@@ -1,0 +1,31 @@
+# CESM2 4×CO2 — RRTMG radiation, 17-plev (apple-to-apple with
+# cesm2_4xco2_official_17p_fu, sharing the SAME 17-plev input data).
+# Purpose: isolate RT engine differences (RRTMG vs Fu) from vertical-grid
+# differences by running both engines on identical inputs.
+#
+# Input: shared with cesm2_4xco2_official_17p_fu (symlink in remote dir).
+case_name: CESM2_4xCO2_official_17p
+description: "CESM2 4xCO2, RRTMG radiation, 17 plev (apple-to-apple with 17p_fu)"
+
+input:
+  base_pres:      input/base_pres.nc
+  base_surf:      input/base_surf.nc
+  perturbed_pres: input/perturbed_pres.nc
+  perturbed_surf: input/perturbed_surf.nc
+  nonrad_forcing: input/nonrad_forcing.nc
+
+# OLD CFRAM exact 17 plev (TOA→surface in pyCFRAM convention).
+grid:
+  pressure_levels: [10, 20, 30, 50, 70, 100, 150, 200, 250, 300,
+                    400, 500, 600, 700, 850, 925, 1000]
+
+radiation:
+  scheme: rrtmg             # RRTMG engine (cfram_rrtmg_1col)
+
+run:
+  nproc: auto
+
+plot:
+  key_region:
+    lon: [0, 360]
+    lat: [-90, 90]

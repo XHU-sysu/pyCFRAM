@@ -11,6 +11,10 @@ Usage:
     python scripts/download_merra2_aerosol.py --years 2003 2022 --month 8 \
         --outdir era5_data/merra2
 
+    python scripts/download_merra2_aerosol.py \
+        --year-list 1991 1992 1993 2023 --month 4 \
+        --outdir era5_data/india_wb23_merra2 --lat 8 37 --lon 63 112
+
 Output:
     era5_data/merra2/M2I3NVAER_{YYYYMMDD}.nc4  (one file per day)
 """
@@ -19,6 +23,7 @@ import os
 import sys
 import argparse
 import calendar
+import time
 from datetime import date
 
 
@@ -82,6 +87,7 @@ def download_day(dt, outdir, variables, lat_range, lon_range):
     """Download one day of MERRA-2 aerosol data."""
     outfile = os.path.join(outdir, f'M2I3NVAER_{dt.strftime("%Y%m%d")}.nc4')
     MIN_SIZE = 10 * 1024 * 1024  # 10 MB — valid MERRA-2 files are ~30-60 MB
+    MAX_ATTEMPTS = 4
     if os.path.exists(outfile) and os.path.getsize(outfile) > MIN_SIZE:
         print(f'  {dt}: skip (exists, {os.path.getsize(outfile)/1e6:.1f} MB)')
         return True
@@ -95,18 +101,29 @@ def download_day(dt, outdir, variables, lat_range, lon_range):
     cmd = (f'curl -s -g -n -c {cookie_file} -b {cookie_file} -L '
            f'-o "{outfile}" "{url}"')
 
-    print(f'  {dt}: downloading...', flush=True)
-    ret = os.system(cmd)
-    if ret != 0:
-        # Try wget as fallback
-        cmd2 = (f'wget -q --auth-no-challenge '
-                f'--load-cookies {cookie_file} --save-cookies {cookie_file} '
-                f'--keep-session-cookies '
-                f'-O "{outfile}" "{url}"')
-        ret = os.system(cmd2)
+    cmd2 = (f'wget -q --auth-no-challenge '
+            f'--load-cookies {cookie_file} --save-cookies {cookie_file} '
+            f'--keep-session-cookies '
+            f'-O "{outfile}" "{url}"')
+
+    ret = 1
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        print(f'  {dt}: downloading... attempt {attempt}/{MAX_ATTEMPTS}',
+              flush=True)
+        ret = os.system(cmd)
+        if ret != 0:
+            ret = os.system(cmd2)
+
+        if os.path.exists(outfile) and os.path.getsize(outfile) >= MIN_SIZE:
+            break
+
+        if os.path.exists(outfile):
+            os.remove(outfile)
+        if attempt < MAX_ATTEMPTS:
+            time.sleep(10 * attempt)
 
     if ret != 0 or not os.path.exists(outfile) or os.path.getsize(outfile) < MIN_SIZE:
-        print(f'  {dt}: FAILED (ret={ret})')
+        print(f'  {dt}: FAILED after {MAX_ATTEMPTS} attempts (ret={ret})')
         if os.path.exists(outfile):
             os.remove(outfile)
         return False
@@ -121,6 +138,8 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--years', type=int, nargs=2, default=[2003, 2022],
                         help='Year range (inclusive)')
+    parser.add_argument('--year-list', type=int, nargs='+', default=None,
+                        help='Explicit years to download; overrides --years')
     parser.add_argument('--month', type=int, default=8, help='Month to download')
     parser.add_argument('--outdir', default='era5_data/merra2',
                         help='Output directory')
@@ -142,18 +161,26 @@ def main():
         'DELP',                      # Layer pressure thickness (for vertical coord)
     ]
 
-    yr_start, yr_end = args.years
+    if args.year_list:
+        years = sorted(set(args.year_list))
+        yr_start, yr_end = years[0], years[-1]
+    else:
+        yr_start, yr_end = args.years
+        years = list(range(yr_start, yr_end + 1))
     total = 0
     failed = 0
 
     print(f'=== MERRA-2 M2I3NVAER Download ===')
-    print(f'Years: {yr_start}-{yr_end}, Month: {args.month}')
+    if args.year_list:
+        print(f'Years: {years}, Month: {args.month}')
+    else:
+        print(f'Years: {yr_start}-{yr_end}, Month: {args.month}')
     print(f'Domain: lat [{args.lat[0]}, {args.lat[1]}], lon [{args.lon[0]}, {args.lon[1]}]')
     print(f'Variables: {len(variables)}')
     print(f'Output: {args.outdir}')
     print()
 
-    for year in range(yr_start, yr_end + 1):
+    for year in years:
         ndays = calendar.monthrange(year, args.month)[1]
         print(f'Year {year} ({ndays} days):')
         for day in range(1, ndays + 1):

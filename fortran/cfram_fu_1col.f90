@@ -392,20 +392,19 @@ program cfram_fu
         drdt(kk, k) = lw_pert(kk) - lw_base(kk)
      end do
   end do
-  ! surface T perturbation. Apple-to-apple OLD GW-drdt.f L361-365: when
-  ! k0 = nv1, pt(nv1) is set to ptc(nv1)+1 AND pts = pt(nv1). Both the
-  ! atmospheric-bottom T (pt(nv1)) and the surface-emission T (pts) get
-  ! perturbed together. Previously we only perturbed pts and left pt(nv1)
-  ! at base — that caused drdt(:,nv1) to be too large in magnitude (atm
-  ! bottom didn't share the warming, so net surface upward LW imbalance was
-  ! over-estimated), making drdt^-1 elements too small → dT_X under-estimated.
+  ! Surface T perturbation — perturb ONLY ts (the skin / surface emission T,
+  ! passed as `pts` argument). pt(nv1) is the atm-bottom interface T (= pt(nv)
+  ! per set_state below) and is NOT physically tied to ts skin. This decouples
+  ! skin T and air bottom T like RRTMG does — OLD CFRAM's bundling
+  ! (perturbing pt(nv1) and pts together when k0=nv1) was a side effect of
+  ! convention `pt(nv1) := ts`, not an intentional physical model. 2026-05-12
+  ! reverted to pure ts perturbation per user direction.
   ts_use_p = ts_use + 1.0
-  pt(nv1)  = ts_use_p
+  ! pt(nv1) unchanged — pure ts (skin only) perturbation
   iseed = -12345
   call S_R_cloudy(sol_use/scon_const, as, scon_const, ts_use_p, &
        rad_t_pert, area_col, sw_pert, lw_pert, &
        water_col, ice_col, iseed, no_cloud_out)
-  pt(nv1)  = ts_use     ! restore (cleanliness; not strictly required)
   do kk = 1, nv1
      drdt(kk, nv1) = lw_pert(kk) - lw_base(kk)
   end do
@@ -676,7 +675,15 @@ subroutine set_state(ipert, nlev, mbs, &
   ! (apple-to-apple OLD CFRAM raw/CFRAM.zip GW-base.f L322-330); otherwise
   ! falls back to ph(nv) HOLD (legacy cesm2_4xco2 / collaborator data which
   ! has no huss field in surf NC).
-  pt(nv1) = ts_use
+  !
+  ! pt(nv1) is the AIR temperature at the surface interface — physically the
+  ! atm-bottom layer T extrapolated to ps, NOT the skin (ts). OLD CFRAM bundled
+  ! pt(nv1) := ts as a convention shortcut, but that conflates skin T with air
+  ! T and breaks the Planck Jacobian's surface-row physics (J⁻¹[atm_bottom,sfc]
+  ! becomes too tightly coupled). 2026-05-12: decoupled — pt(nv1) HOLDs the atm
+  ! bottom T (= pt(nv)), skin T is passed exclusively via the `pts` argument
+  ! to S_R_cloudy. Matches RRTMG's tave/tbound separation.
+  pt(nv1) = pt(nv)
   if (abs(huss_use) > 900.0) then
      ph(nv1) = ph(nv)              ! sentinel → fallback
   else

@@ -33,9 +33,10 @@ Fortran radiation (per grid point) — RRTMG OR Fu, picked by case.yaml
 
 Python (decomposition + analysis)
   ├── dT_i = -(∂R/∂T)⁻¹ × frc_i           # radiative terms (all 17, incl. splits)
-  ├── dT_lhflx/shflx                       # non-radiative via same Planck matrix
-  ├── dT_sfcdyn/ocndyn                     # energy-conservation residuals
-  ├── dT_atmdyn = dT_obs − Σ(all others)   # atmospheric dynamics (residual)
+  ├── dT_lhflx/shflx                       # non-radiative; forcing on surface row only
+  ├── dT_atmdyn/sfcdyn/ocndyn/dry          # from frc_full (warm-state ΔR), same Planck matrix
+  │     dry = atmdyn + sfcdyn              #   (atm rows / surface row / full column)
+  │     sfcdyn = ocndyn + lhflx + shflx    #   exact identity (machine precision)
   └── multiprocessing parallel execution   # embarrassingly parallel over grid points
 ```
 
@@ -317,8 +318,8 @@ pyCFRAM/
 | Radiative (bulk) | `co2`, `q`, `ts`, `o3`, `solar`, `albedo`, `cloud`, `aerosol`, `warm` |
 | Cloud LW/SW split | `cloud_lw`, `cloud_sw` — exact additive (`cloud == cloud_lw + cloud_sw`) |
 | Aerosol species | `bc`, `ocphi`, `ocpho`, `sulf`, `ss`, `dust` — sum ≈ bulk (small non-linear residual) |
-| Non-radiative | `lhflx`, `shflx` |
-| Derived | `atmdyn`, `sfcdyn`, `ocndyn`, `observed` |
+| Non-radiative | `lhflx`, `shflx` (forcing placed on surface row only) |
+| Derived | `atmdyn`, `sfcdyn`, `ocndyn`, `dry`, `observed` — `dry = atmdyn + sfcdyn`, `sfcdyn = ocndyn + lhflx + shflx` (exact) |
 
 ## Input Data Format
 

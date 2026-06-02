@@ -43,8 +43,10 @@ Fortran radiation engine (per grid point) — RRTMG or Fu, picked by case.yaml
 Python (scripts/run_parallel_python.py)
   ├── dT = −(∂R/∂T)⁻¹ · F for every radiative forcing
   ├── dT for non-radiative lhflx/shflx via the same Planck matrix
-  ├── sfcdyn/ocndyn derived from energy-balance residuals
-  ├── atmdyn residual: dT_obs − Σ(all other terms)
+  │     (forcing on the surface row only — see §7)
+  ├── atmdyn/sfcdyn/ocndyn/dry from frc_full (warm-state ΔR) via the
+  │     same Planck matrix:  dry = atmdyn(atm rows) + sfcdyn(surface row),
+  │     sfcdyn = ocndyn + lhflx + shflx (exact identity)
   └── multiprocessing.Pool, one worker per grid point
 ```
 
@@ -124,8 +126,8 @@ Shape `(lev, lat, lon)` with surface at `lev[-1]`. Fill value `-999`.
 | Radiative (bulk) | `frc_/dT_{co2, q, ts, o3, solar, albedo, cloud, aerosol, warm}` | 9 terms |
 | Cloud LW/SW split | `frc_/dT_{cloud_lw, cloud_sw}` | Exactly additive: `cloud = lw + sw` to float64 precision |
 | Aerosol species | `frc_/dT_{bc, ocphi, ocpho, sulf, ss, dust}` | Sum ≈ bulk; small residual = non-linear coupling |
-| Non-radiative | `dT_{lhflx, shflx}` | From the input `nonrad_forcing.nc` |
-| Derived | `dT_{atmdyn, sfcdyn, ocndyn, observed}` | Residual + energy-balance splits |
+| Non-radiative | `dT_{lhflx, shflx}` | From `nonrad_forcing.nc`; forcing placed on the **surface row only** |
+| Derived | `dT_{atmdyn, sfcdyn, ocndyn, dry, observed}` | All from `frc_full` (warm-state ΔR) via the Planck inverse. `dry = atmdyn + sfcdyn`; `sfcdyn = ocndyn + lhflx + shflx` (both exact to float precision) |
 
 ---
 
@@ -157,6 +159,25 @@ workspace immediately after the cloud `rad_driver` call. The resulting
 surface `dT` by solving only the atmospheric sub-block, pyCFRAM inverts the
 full `(nlayer+1) × (nlayer+1)` Planck matrix in Python and produces a
 physically meaningful surface response.
+
+**Dynamics terms from `frc_full`, and the surface-flux identity.** `frc_full`
+is the radiative imbalance evaluated in the *warm* atmosphere (`rad_1d_full`,
+not a base-state linearisation). Four dynamics terms are derived from it with
+the same Planck inverse: `atmdyn` (forcing on atmosphere rows only), `sfcdyn`
+(surface row only), `dry = atmdyn + sfcdyn` (full column), and `ocndyn`
+(surface row = `−frc_full[sfc] − Δlh − Δsh`). Because `lhflx`/`shflx` forcings
+are placed on the **surface row only**, the identity
+
+```
+dT_sfcdyn ≡ dT_ocndyn + dT_lhflx + dT_shflx
+```
+
+holds to machine precision at every level. (A bug fixed 2026-06-01 had copied
+the lhflx/shflx vertical profile onto atmosphere rows, so `dT_lhflx/dT_shflx`
+carried a spurious atmospheric Planck response absent from `ocndyn`, breaking
+the identity with a structured ~2 K residual at all levels — the discrepancy
+reported in `raw/SFCDYN-问题.docx`. The terms are **not** independent CFRAM
+processes; `sfcdyn` is by construction the sum.)
 
 **ERA5 6-hourly accumulation ×6.** CDS returns 1-hour increments per
 6-hour step for `ssrd/ssr/tisr/slhf/sshf`. `data/era5_source.py` multiplies
@@ -305,8 +326,13 @@ Production runs happen on the `hqlx*` cluster:
   uses mini's possibly-stale copy.
 - Default production host: **`hqlx220`** (384 cores, ifort 2022.2 + MKL
   LP64 + netCDF4). Source `/home/lzhenn/.bashrc_liquor_i22wrf415` before
-  `make` / `python3 run_case.py`. Backup hosts: `hqlx204` (256 cores,
-  gfortran only; rebuild with `make TOOLCHAIN=gnu`), `hqlx221–223`.
+  `make` / `python3 run_case.py`. Backup hosts with the same ifort+MKL
+  toolchain: `hqlx204` / `hqlx205` (256 cores) and `hqlx221–223` (384
+  cores) — the ifort binary built on `hqlx220` runs on all of them via the
+  NFS-shared `/home/lzhenn/work`.
+- **`hqlx74` cannot run the Python runner**: its glibc is 2.17, but the
+  conda `netCDF4` wheel needs `GLIBC_2.25` and fails to import. Use it for
+  pure-Fortran or download tasks only.
 - A single Fortran binary handles any vertical grid at runtime — `nlev` is
   inferred from `data_prep/plev.dat` (8 bytes per level) on launch. No
   per-grid rebuild needed.

@@ -309,8 +309,20 @@ def process_column(args):
     exe_1col = d['exe_1col']
     os.symlink(exe_1col, os.path.join(tmpdir, 'cfram_rrtmg'))
 
-    # Run
-    ret = os.system('cd %s && ./cfram_rrtmg > /dev/null 2>&1' % tmpdir)
+    # Run. Keep per-column logs so runtime linker / LAPACK failures are not
+    # silently converted into all-NaN output.
+    log_path = os.path.join(tmpdir, 'cfram_rrtmg.log')
+    ret = os.system('cd %s && ./cfram_rrtmg > cfram_rrtmg.log 2>&1' % tmpdir)
+    if ret != 0:
+        try:
+            with open(log_path) as f:
+                tail = ''.join(f.readlines()[-20:])
+        except Exception:
+            tail = '(no cfram_rrtmg.log available)'
+        shutil.rmtree(tmpdir)
+        raise RuntimeError(
+            'Fortran worker failed at ilat=%s ilon=%s ret=%s\n%s'
+            % (ilat, ilon, ret, tail))
 
     # Read output: forcing + drdt_inv, solve dT in Python
     result = {}

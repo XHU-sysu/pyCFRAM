@@ -126,14 +126,16 @@ def plot_polar(data, case_name, hemisphere='north', out_path=None):
         ax.set_extent([-180, 180, lat_min, lat_max], crs=ccrs.PlateCarree())
         ax.set_boundary(circle, transform=ax.transAxes)
         if not np.all(np.isnan(field)):
-            # Use explicit `colors` (8 entries for 8 bins between 9 LEVELS).
-            # Center two bins are #ffffff so panels with frc≈0 render true white,
-            # matching raw/north.jpg.
-            cf = ax.contourf(data['lon'], data['lat'], field,
-                             levels=LEVELS, colors=_BIN_COLORS,
-                             extend='both', transform=ccrs.PlateCarree())
-            cf.cmap.set_under('#053061')
-            cf.cmap.set_over('#67001f')
+            # Use pcolormesh (NOT contourf): shapely 2.x + cartopy 0.22
+            # MultiPolygon API has a latent bug that for SOME polar columns
+            # silently drops contour bins, leaving large white patches even
+            # when the data is correct (observed on RRTMG cesm2_4xco2_official_17p
+            # panel (b) WV, where Arctic dT_q is uniformly +4..+8 K but contourf
+            # rendered as huge white area). pcolormesh sidesteps the issue.
+            norm = mcolors.BoundaryNorm(LEVELS, len(_BIN_COLORS), clip=False)
+            cf = ax.pcolormesh(data['lon'], data['lat'], field,
+                               norm=norm, cmap=CMAP, shading='auto',
+                               transform=ccrs.PlateCarree())
         ax.coastlines(resolution='110m', linewidth=0.4, color='k')
         gl = ax.gridlines(draw_labels=False, linewidth=0.3, alpha=0.4)
         ax.set_title(f'({letter}) {label}', fontsize=12, loc='left')
@@ -164,11 +166,12 @@ def main(case_name):
     fig_dir = cfg['_figures_dir']
     os.makedirs(fig_dir, exist_ok=True)
 
+    suffix = 'pycfram-' + cfg.get('radiation', {}).get('scheme', 'unknown').lower()
     # Both hemispheres
     plot_polar(data, case_name, 'north',
-               os.path.join(fig_dir, 'fig_13panel_north_polar.png'))
+               os.path.join(fig_dir, f'fig_13panel_north_polar_{suffix}.png'))
     plot_polar(data, case_name, 'south',
-               os.path.join(fig_dir, 'fig_13panel_south_polar.png'))
+               os.path.join(fig_dir, f'fig_13panel_south_polar_{suffix}.png'))
 
 
 if __name__ == '__main__':
