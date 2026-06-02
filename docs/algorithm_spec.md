@@ -199,6 +199,32 @@ dT_X = −drdt_inv · frc_X       (length nlayer+1 vector, atm[1:nlayer] + surfa
 
 Both atmospheric layer and surface responses are solved together. Surface dT is NOT zeroed out (this is a change from the original CFRAM-RRTMG reference code). Levels above the surface pressure (nlayer+1:nlev) are filled with `-999.0` in the output.
 
+### 8.1 Dynamics / non-radiative terms (Python)
+
+The full warm-state radiative imbalance `frc_full` (from the `rad_1d_full`
+call, using `t_warm/q_warm/o3_warm/...`) drives the dynamics decomposition via
+the same Planck inverse:
+
+| Term | Forcing vector | Meaning |
+|------|---------------|---------|
+| `dT_atmdyn` | `−frc_full` on atmosphere rows, surface = 0 | atmospheric heat transport |
+| `dT_sfcdyn` | `−frc_full` on surface row, atmosphere = 0 | surface energy-budget residual |
+| `dT_dry`    | `−frc_full`, full column | `= dT_atmdyn + dT_sfcdyn` |
+| `dT_ocndyn` | surface row `= −frc_full[sfc] − Δlh − Δsh` | ocean / sub-surface transport |
+
+`lhflx`/`shflx` forcings are placed on the **surface row only**, so
+
+```
+dT_sfcdyn ≡ dT_ocndyn + dT_lhflx + dT_shflx     (exact to machine precision)
+```
+
+i.e. `sfcdyn` is by construction the sum of the ocean-transport and surface-flux
+responses — not an independent process. (Placing the flux forcing on atmosphere
+rows breaks this identity; that bug was fixed 2026-06-01.) For the OLD-CFRAM-style
+closure *plot* only, `plot_closure_profile.py` redefines `atmdyn` as the closure
+residual `dT_obs − Σrad − Σnonrad − dT_ocndyn`; the NetCDF `dT_atmdyn` variable
+remains the forcing-based quantity above.
+
 ## 9. Aerosol Optical Properties
 
 **Framework origin:** the extension of CFRAM to include an explicit aerosol
@@ -264,8 +290,9 @@ non-linearity that a linear (path-B) Planck-inverse split would drop.
 | Δ(S−R)^AER | `frc_aerosol` (bulk) | ✓ |
 | — (paper per-species via external forcing) | `frc_bc`, `frc_ocphi`, `frc_ocpho`, `frc_sulf`, `frc_ss`, `frc_dust` | Extra: in-RRTMG 6-species perturbation |
 | ΔS^α | `frc_albedo` | ✓ |
-| ΔQ^ATD | `dT_atmdyn` (Python, residual) | Derived in Python |
-| ΔQ^SRF | `dT_sfcdyn`, `dT_lhflx`, `dT_shflx` (Python) | lhflx/shflx from input; sfcdyn/ocndyn via energy balance |
+| ΔQ^ATD | `dT_atmdyn` (Python) | Forcing-based from `frc_full` atm rows (see §8.1) |
+| ΔQ^SRF | `dT_sfcdyn`, `dT_ocndyn`, `dT_lhflx`, `dT_shflx` (Python) | `sfcdyn = ocndyn + lhflx + shflx` exactly; all from `frc_full` surface row + input fluxes (see §8.1) |
+| — | `dT_dry` | Extra: `= atmdyn + sfcdyn` (full-column `frc_full` response) |
 | — | `frc_ts` | Extra: surface temperature radiative response |
 
 ## 11. Historical Note

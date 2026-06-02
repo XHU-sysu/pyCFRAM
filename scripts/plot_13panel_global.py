@@ -145,7 +145,8 @@ def main(case_name):
     plt.tight_layout(rect=[0, 0.07, 1, 0.95])
     fig_dir = cfg['_figures_dir']
     os.makedirs(fig_dir, exist_ok=True)
-    out_png = os.path.join(fig_dir, 'fig_13panel_global.png')
+    suffix = 'pycfram-' + cfg.get('radiation', {}).get('scheme', 'unknown').lower()
+    out_png = os.path.join(fig_dir, f'fig_13panel_global_{suffix}.png')
     plt.savefig(out_png, dpi=150, bbox_inches='tight')
     print('Saved:', out_png)
 

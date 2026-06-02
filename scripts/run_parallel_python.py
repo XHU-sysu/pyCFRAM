@@ -309,8 +309,20 @@ def process_column(args):
     exe_1col = d['exe_1col']
     os.symlink(exe_1col, os.path.join(tmpdir, 'cfram_rrtmg'))
 
-    # Run
-    ret = os.system('cd %s && ./cfram_rrtmg > /dev/null 2>&1' % tmpdir)
+    # Run. Keep per-column logs so runtime linker / LAPACK failures are not
+    # silently converted into all-NaN output.
+    log_path = os.path.join(tmpdir, 'cfram_rrtmg.log')
+    ret = os.system('cd %s && ./cfram_rrtmg > cfram_rrtmg.log 2>&1' % tmpdir)
+    if ret != 0:
+        try:
+            with open(log_path) as f:
+                tail = ''.join(f.readlines()[-20:])
+        except Exception:
+            tail = '(no cfram_rrtmg.log available)'
+        shutil.rmtree(tmpdir)
+        raise RuntimeError(
+            'Fortran worker failed at ilat=%s ilon=%s ret=%s\n%s'
+            % (ilat, ilon, ret, tail))
 
     # Read output: forcing + drdt_inv, solve dT in Python
     result = {}
@@ -611,14 +623,27 @@ def main():
         for nonrad_term in ['lhflx', 'shflx']:
             if nonrad_term not in nc_pf.variables:
                 continue
-            frc_3d = np.array(nc_pf.variables[nonrad_term][0, ::-1, :, :], dtype=np.float64)
-            if frc_3d.shape[1] != nlat or frc_3d.shape[2] != nlon:
+            # lhflx/shflx are SURFACE energy budget terms; only the surface row
+            # of the forcing vector should carry the value. Input NC packs the
+            # surface flux at lev[0] (closest-to-surface in NC's surface→TOA
+            # ordering); atm levels lev[1..N-1] are zero. We extract the lev[0]
+            # 2D slice and place it exclusively at the surface row of frc_full.
+            #
+            # Do NOT copy the full 17-level NC profile into frc_full[:NLEV] —
+            # that put -7.23 W/m² simultaneously at frc_full[NLEV-1] (atm
+            # bottom, plev=1000hPa) and frc_full[NLEV] (surface, plev=1013hPa).
+            # The Planck inverse propagated both → dT_lhflx and dT_shflx ~2×
+            # what OLD CFRAM (xiaominghu) produces. Verified single-col probe
+            # at lat=-0.47, lon=180:
+            #   OLD: frc[sfc]=-7.55 → dT_lhflx[lev=1000]=-2.79 K
+            #   Fu (with bug): same input → dT_lhflx[lev=1000]=-5.42 K (1.94×)
+            sfc_2d = np.array(nc_pf.variables[nonrad_term][0, 0, :, :], dtype=np.float64)
+            if sfc_2d.shape[0] != nlat or sfc_2d.shape[1] != nlon:
                 print("  WARNING: %s shape %s != grid (%d,%d), skipping" % (
-                    nonrad_term, frc_3d.shape, nlat, nlon))
+                    nonrad_term, sfc_2d.shape, nlat, nlon))
                 continue
             frc_full = np.zeros((NLEV + 1, nlat, nlon))
-            frc_full[:NLEV, :, :] = frc_3d[:NLEV, :, :]
-            frc_full[NLEV, :, :] = np.array(nc_pf.variables[nonrad_term][0, 0, :, :], dtype=np.float64)
+            frc_full[NLEV, :, :] = sfc_2d
             frc_full = np.where(np.abs(frc_full) > 900, 0.0, frc_full)
             data['frc_' + nonrad_term] = frc_full
             print("  frc_%s: sfc mean=%.3f W/m2" % (nonrad_term, np.nanmean(frc_full[NLEV])))

@@ -18,7 +18,7 @@ CFRAM 的核心思想是将观测到的温度变化 ΔT 分解为各物理过程
 - `(∂R/∂T)` 是 Planck 反馈矩阵（38×38，37 个大气层 + 地表），描述温度对辐射通量的偏导数
 - `ΔF_radiative` 包括水汽、云、气溶胶、CO₂、O₃、太阳辐射、地表反照率、地表温度等 9 项辐射强迫
 - `ΔF_non-radiative` 包括潜热通量、感热通量、地表过程等非辐射强迫
-- 大气动力项通过残差法获得：`ΔT_atmdyn = ΔT_observed - Σ(其他所有项)`
+- 动力项（atmdyn/sfcdyn/ocndyn/dry）由暖态辐射不平衡 `frc_full` 经同一 Planck 逆矩阵求得（见 §2.1、algorithm_spec §8.1）。其中 `dry = atmdyn + sfcdyn`，且 `sfcdyn = ocndyn + lhflx + shflx`（机器精度严格成立——lhflx/shflx 强迫仅置于地表行）。仅在 OLD-CFRAM 风格的 closure 出图中，`atmdyn` 才被重定义为残差 `ΔT_obs − Σ其他项`
 
 ### 1.2 参考文献
 
@@ -57,9 +57,10 @@ CFRAM 的核心思想是将观测到的温度变化 ΔT 分解为各物理过程
 │ Python（分解求解 + 并行调度）                           │
 │                                                         │
 │  辐射项：  dT_i = -(∂R/∂T)⁻¹ × frc_i    (numpy 矩阵乘)│
-│  非辐射项：dT_lhflx/shflx/sfcdyn         (同一 Planck)  │
+│  非辐射项：dT_lhflx/shflx (强迫仅置地表行,同一 Planck) │
 │  气溶胶分种类：dT_bc/oc/sulf/seas/dust   (同一 Planck)  │
-│  大气动力：dT_atmdyn = dT_obs - Σ(所有其他项)  (残差法) │
+│  动力项：dT_atmdyn/sfcdyn/ocndyn/dry  (frc_full,同Planck)│
+│         dry=atmdyn+sfcdyn; sfcdyn=ocndyn+lhflx+shflx     │
 │  并行：multiprocessing Pool, 每格点独立进程              │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -78,7 +79,7 @@ RRTMG 内部的 Fortran module 全局变量在线程间共享，导致数据竞�
 | 并行方式 | multiprocessing（非 OpenMP） | RRTMG 线程不安全 |
 | 非辐射项 | 用户提供 forcing，Planck 矩阵求解 | 保持通用性 |
 | 气溶胶分种类 | per-species forcing × 自计算 Planck 矩阵 | 半自计算 |
-| 大气动力项 | 残差法 | 无需额外数据 |
+| 动力项 (atmdyn/sfcdyn/ocndyn/dry) | 由 frc_full 经 Planck 逆求得（非残差） | sfcdyn=ocndyn+lhflx+shflx 严格成立 |
 | 输入格式 | 标准 NetCDF（base + perturbed 两个状态） | 不预设 event/climatology |
 
 ---
@@ -100,8 +101,8 @@ pyCFRAM/
 │   └── eh22/
 ├── core/                    # Python 核心模块
 │   ├── config.py            # 统一配置加载器（含 get_drdt_eval/probe/get_co2_handling/get_q_handling）
-│   ├── constants.py         # 物理常量 + RRTMG 固有参数
-│   └── aerosol_optics.py    # 气溶胶光学属性（混合比 → AOD/SSA/g）
+│   └── constants.py         # 物理常量 + RRTMG 固有参数
+│                            #（气溶胶光学已 inline 进 run_parallel_python.py:compute_aerosol_column）
 ├── fortran/                 # Fortran 辐射引擎（RRTMG + Fu，由 case.yaml 选择）
 │   ├── cfram_rrtmg.f90      # RRTMG 单柱主程序（make sed 出 cfram_rrtmg_1col.f90）
 │   ├── cfram_fu_1col.f90    # Fu 单柱主程序（dual-MC sub-column 重叠）
@@ -475,10 +476,13 @@ from core.config import load_case, defaults, get_plev, get_aerosol_map
 | `dT_warm` | (lev, lat, lon) | 总辐射变化 |
 | `dT_lhflx` | (lev, lat, lon) | 潜热通量贡献（需 nonrad_forcing） |
 | `dT_shflx` | (lev, lat, lon) | 感热通量贡献 |
-| `dT_sfcdyn` | (lev, lat, lon) | 地表过程贡献 |
-| `dT_bc/oc/sulf/seas/dust` | (lev, lat, lon) | 气溶胶分种类贡献（需 nonrad_forcing） |
+| `dT_sfcdyn` | (lev, lat, lon) | 地表过程贡献（= ocndyn + lhflx + shflx，严格成立） |
+| `dT_ocndyn` | (lev, lat, lon) | 海洋/次表层热输送（frc_full 地表行 − Δlh − Δsh） |
+| `dT_bc/oc/sulf/seas/dust` | (lev, lat, lon) | 气溶胶分种类贡献 |
 | `dT_observed` | (lev, lat, lon) | 观测温度变化 (T_perturbed - T_base) |
-| `dT_atmdyn` | (lev, lat, lon) | 大气动力贡献（残差） |
+| `dT_atmdyn` | (lev, lat, lon) | 大气动力贡献（frc_full 大气层行，非残差） |
+| `dT_dry` | (lev, lat, lon) | = atmdyn + sfcdyn（frc_full 整柱响应） |
+| `dT_cloud_lw/sw` | (lev, lat, lon) | 云 LW/SW 拆分（精确可加 = dT_cloud） |
 | `frc_*` | (lev, lat, lon) | 对应的辐射 forcing (W/m²) |
 
 ### 8.2 level 维度

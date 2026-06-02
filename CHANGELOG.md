@@ -16,6 +16,65 @@ and this project uses date-based milestones (no semver tags yet).
 
 ---
 
+## 2026-06-01 — sfcdyn forcing fix + Fu/RRTMG surface-row unbundle + India case
+
+### Fixed
+- **`sfcdyn = ocndyn + lhflx + shflx` identity restored** (the headline
+  fix). The nonrad loader in `run_parallel_python.py` was copying the full
+  `lhflx`/`shflx` vertical profile onto the atmosphere rows of the forcing
+  vector (`frc_full[:NLEV]`), while `dT_ocndyn` subtracts only the surface
+  flux. As a result `dT_lhflx`/`dT_shflx` carried a spurious atmospheric
+  Planck response that `ocndyn` never removed, breaking the design identity
+  with a structured residual at every level (global mean ~2.15 K, max
+  ~190 K on `cesm2_4xco2_official`) — the discrepancy reported in
+  `raw/SFCDYN-问题.docx`. Now the flux is placed on the **surface row only**;
+  the identity holds to machine precision (max |residual| 3.6×10⁻¹⁴ K).
+  Diagnostic: `dT_sfcdyn/dT_ocndyn` is column-constant (both clean
+  surface-forcing responses) while `dT_lhflx/dT_sfcdyn` was not — proving
+  the leak was confined to the two flux terms.
+
+### Changed
+- **Surface-row Planck perturbation unbundled** in both engines. RRTMG
+  `drdt.f90`: the surface row perturbs `ts` only (reverted an earlier
+  attempt that also bumped `t_atm[nlayer]` — RRTMG's `tint_cfram(nlayer)=ts`
+  is independent of the bottom layer T). Fu `cfram_fu_1col.f90`:
+  `pt(nv1) = pt(nv)` so the skin-T perturbation no longer pins the bottom
+  atmosphere temperature. Skin T and bottom-layer T are now physically
+  decoupled in the Jacobian for both engines.
+- **Plot scripts tag the radiation engine** in output filenames:
+  `_pycfram-{rrtmg,fu}` for pyCFRAM runs, `_oldcfram` for OLD-CFRAM
+  comparison plots (`plot_13panel_global.py`, `plot_13panel_polar.py`,
+  `plot_closure_profile.py`).
+- `plot_13panel_polar.py` switched to `pcolormesh` to dodge a
+  shapely-2.x / cartopy-0.22 `MultiPolygon` contourf rendering bug that
+  produced white artifacts over the pole.
+- Documentation (`README`, `algorithm_spec` §8.1, `input_spec`,
+  `technical_notes_{en,zh}`): the dynamics terms `atmdyn/sfcdyn/ocndyn/dry`
+  are forcing-based responses to `frc_full` (warm-state ΔR), **not**
+  residuals; documented `dry = atmdyn + sfcdyn` and the surface-flux
+  identity above.
+
+### Added
+- **OLD-CFRAM-style closure plotting.** `plot_closure_profile.py` (and
+  `plot_closure_profile_oldcfram.py`) drop `ts` from the closure sum and
+  define the plotted `atmdyn` as the closure residual `dT_obs − Σrad −
+  Σnonrad − ocndyn`; panels with `max|prof| < 0.1 K` are filtered.
+- **Contract M1 case ② India–Bangladesh wet-heat 2023** —
+  `cases/india_wb23/case.yaml` (warm core Apr 17–20, CO2 385→421.3 ppmv).
+  ERA5 6-hourly April download pipeline `scripts/download_era5_india23.py`
+  (CDS, 2-var-pair requests under the per-request cost cap) and
+  `download_era5_india23_ncar.py` (NCAR RDA mirror). See `docs/cases.md`.
+- `fortran/fu_helpers.f` split out of the Fu source tree.
+- Plot helpers `plot_13panel_oldcfram.py`, `plot_13panel_polar_from_slice.py`
+  (surface-slice fallback when the full NC trips the cartopy polar bug).
+
+### Notes
+- `hqlx74` confirmed unusable for the Python runner (glibc 2.17 < the
+  `GLIBC_2.25` the conda `netCDF4` wheel needs). Production re-runs use
+  `hqlx220` (build) + `hqlx205`/`204`/`221–223` (ifort binary via NFS).
+
+---
+
 ## 2026-05-10 — `radiation:` schema + climlab single-column validation
 
 ### Added

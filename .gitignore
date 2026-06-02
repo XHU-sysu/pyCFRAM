@@ -30,6 +30,7 @@ cases/*/output/
 cases/*/figures/
 cases/*/input/
 cases/*/input/*.bak_*
+cases/_remote_sync/
 cfram_output/
 
 # Experiment runtime outputs
@@ -62,3 +63,4 @@ Thumbs.db
 *~
 .vscode/
 .idea/
+.oa.json
