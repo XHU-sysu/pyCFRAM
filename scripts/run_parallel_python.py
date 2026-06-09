@@ -309,8 +309,20 @@ def process_column(args):
     exe_1col = d['exe_1col']
     os.symlink(exe_1col, os.path.join(tmpdir, 'cfram_rrtmg'))
 
-    # Run
-    ret = os.system('cd %s && ./cfram_rrtmg > /dev/null 2>&1' % tmpdir)
+    # Run. Keep per-column logs so runtime linker / LAPACK failures are not
+    # silently converted into all-NaN output.
+    log_path = os.path.join(tmpdir, 'cfram_rrtmg.log')
+    ret = os.system('cd %s && ./cfram_rrtmg > cfram_rrtmg.log 2>&1' % tmpdir)
+    if ret != 0:
+        try:
+            with open(log_path) as f:
+                tail = ''.join(f.readlines()[-20:])
+        except Exception:
+            tail = '(no cfram_rrtmg.log available)'
+        shutil.rmtree(tmpdir)
+        raise RuntimeError(
+            'Fortran worker failed at ilat=%s ilon=%s ret=%s\n%s'
+            % (ilat, ilon, ret, tail))
 
     # Read output: forcing + drdt_inv, solve dT in Python
     result = {}
@@ -358,6 +370,31 @@ def process_column(args):
             rec2_len = struct.unpack('i', raw[pos:pos+4])[0]; pos += 4
             n = nlayer_val + 1
             mat = np.frombuffer(raw[pos:pos+rec2_len], dtype=np.float64).copy().reshape(n, n, order='F')
+
+            # Optional per-cell truncated-SVD regularisation of the Planck inverse
+            # (radiation.planck_rcond). The exact inverse `mat` = drdt^-1 has SVD
+            # mat = Ub diag(Sb) Vbt with Sb = 1/sigma(drdt) (descending). At the
+            # radiatively-inert tropical cold-point tropopause drdt has a near-null
+            # direction (tiny sigma) -> a huge Sb that leaks an unphysical spike to
+            # the surface. We zero only those catastrophic directions (sigma <
+            # rcond*sigma_max  <=>  Sb > Sb_min/rcond), keeping every other
+            # direction EXACTLY 1/sigma. A well-conditioned column has all
+            # sigma >= rcond*sigma_max -> nothing truncated -> bitwise-identical to
+            # the exact inverse (magnitudes untouched). Only the rare cold-point
+            # cells lose their one near-null direction. result['planck_ntrunc']
+            # records how many directions were dropped (0 for healthy columns).
+            rcond = d.get('planck_rcond')
+            if rcond and n > 1:
+                Ub, Sb, Vbt = np.linalg.svd(mat)
+                cut = Sb[-1] / rcond               # Sb[-1] = 1/sigma_max(drdt)
+                drop = Sb > cut
+                ntr = int(drop.sum())
+                if ntr:
+                    Sb = np.where(drop, 0.0, Sb)
+                    mat = (Ub * Sb) @ Vbt
+                result['planck_ntrunc'] = ntr
+            else:
+                result['planck_ntrunc'] = 0
         except:
             mat = None
             nlayer_val = 0
@@ -498,9 +535,16 @@ def main():
     co2_handling = get_co2_handling(cfg)
     # Optional: Planck Jacobian probe scheme (RRTMG only). Default 'onesided'.
     drdt_probe = get_drdt_probe(cfg)
+    # Optional per-cell truncated-SVD regularisation of the Planck inverse,
+    # targeting only the cold-point near-null directions (see process_column).
+    planck_rcond = cfg.get('radiation', {}).get('planck_rcond')
+    planck_rcond = float(planck_rcond) if planck_rcond else None
 
     print("=== Python parallel CFRAM: %s, %d procs (nlev=%d) ===" %
           (cfg.get('case_name', args.case), nproc, NLEV))
+    if planck_rcond:
+        print("Planck inverse: truncated-SVD regularisation, rcond=%g "
+              "(drops only cold-point near-null directions; exact elsewhere)" % planck_rcond)
     if output_terms is not None:
         print("Output filter active: writing only dT/frc for %s" % output_terms)
     if drdt_eval == 'midstate':
@@ -571,6 +615,7 @@ def main():
         'drdt_probe': drdt_probe,
         'q_handling': q_handling,
         'co2_handling': co2_handling,
+        'planck_rcond': planck_rcond,
     }
     for s in AEROSOL_MAP:
         # Aerosols may be missing in CMIP6 raw cases; tolerate absence.
@@ -611,14 +656,27 @@ def main():
         for nonrad_term in ['lhflx', 'shflx']:
             if nonrad_term not in nc_pf.variables:
                 continue
-            frc_3d = np.array(nc_pf.variables[nonrad_term][0, ::-1, :, :], dtype=np.float64)
-            if frc_3d.shape[1] != nlat or frc_3d.shape[2] != nlon:
+            # lhflx/shflx are SURFACE energy budget terms; only the surface row
+            # of the forcing vector should carry the value. Input NC packs the
+            # surface flux at lev[0] (closest-to-surface in NC's surface→TOA
+            # ordering); atm levels lev[1..N-1] are zero. We extract the lev[0]
+            # 2D slice and place it exclusively at the surface row of frc_full.
+            #
+            # Do NOT copy the full 17-level NC profile into frc_full[:NLEV] —
+            # that put -7.23 W/m² simultaneously at frc_full[NLEV-1] (atm
+            # bottom, plev=1000hPa) and frc_full[NLEV] (surface, plev=1013hPa).
+            # The Planck inverse propagated both → dT_lhflx and dT_shflx ~2×
+            # what OLD CFRAM (xiaominghu) produces. Verified single-col probe
+            # at lat=-0.47, lon=180:
+            #   OLD: frc[sfc]=-7.55 → dT_lhflx[lev=1000]=-2.79 K
+            #   Fu (with bug): same input → dT_lhflx[lev=1000]=-5.42 K (1.94×)
+            sfc_2d = np.array(nc_pf.variables[nonrad_term][0, 0, :, :], dtype=np.float64)
+            if sfc_2d.shape[0] != nlat or sfc_2d.shape[1] != nlon:
                 print("  WARNING: %s shape %s != grid (%d,%d), skipping" % (
-                    nonrad_term, frc_3d.shape, nlat, nlon))
+                    nonrad_term, sfc_2d.shape, nlat, nlon))
                 continue
             frc_full = np.zeros((NLEV + 1, nlat, nlon))
-            frc_full[:NLEV, :, :] = frc_3d[:NLEV, :, :]
-            frc_full[NLEV, :, :] = np.array(nc_pf.variables[nonrad_term][0, 0, :, :], dtype=np.float64)
+            frc_full[NLEV, :, :] = sfc_2d
             frc_full = np.where(np.abs(frc_full) > 900, 0.0, frc_full)
             data['frc_' + nonrad_term] = frc_full
             print("  frc_%s: sfc mean=%.3f W/m2" % (nonrad_term, np.nanmean(frc_full[NLEV])))
@@ -680,6 +738,8 @@ def main():
     # Bulk radiative + per-species forcings stored in NetCDF
     frc_out = {t: np.full((NLEV+1, nlat, nlon), np.nan) for t in terms + fortran_aer_species}
 
+    ntrunc_map = np.zeros((nlat, nlon))  # # Planck near-null directions truncated per cell
+
     def _absorb(ilat, ilon, result):
         for t in terms:
             dT_out[t][:, ilat, ilon] = result['dT_'+t]
@@ -690,6 +750,7 @@ def main():
         for t in fortran_aer_species:
             if 'frc_'+t in result:
                 frc_out[t][:, ilat, ilon] = result['frc_'+t]
+        ntrunc_map[ilat, ilon] = result.get('planck_ntrunc', 0)
 
     done = 0
     if n_cells == 1:
@@ -714,6 +775,13 @@ def main():
 
     elapsed = time.time() - t0
     print("Completed in %.1f seconds (%.1f pts/s)" % (elapsed, len(tasks) / elapsed))
+
+    if planck_rcond:
+        nreg = int((ntrunc_map > 0).sum())
+        print("Planck truncated-SVD (rcond=%g): %d/%d cells regularised (%.2f%%); "
+              "the other %d cells got the exact inverse unchanged" %
+              (planck_rcond, nreg, ntrunc_map.size, 100.0*nreg/ntrunc_map.size,
+               int((ntrunc_map == 0).sum())))
 
     # Save as NetCDF
     outfile = os.path.join(OUTDIR, 'cfram_result.nc')
@@ -751,17 +819,31 @@ def main():
             return True
         return t in allowed_rad
 
+    FILL = -999.0
+
+    def clean_for_save(arr):
+        """Encode internal NaN/missing values as NetCDF fill values."""
+        arr = np.asarray(arr, dtype=np.float64)
+        arr = np.where(np.isclose(arr, FILL), np.nan, arr)
+        return np.where(np.isfinite(arr), arr, FILL)
+
+    def create_output_var(name):
+        v = nc.createVariable(name, 'f8', ('lev', 'lat', 'lon'),
+                              fill_value=FILL)
+        v.missing_value = FILL
+        return v
+
     for t in all_dT_terms:
         if not _allowed(t):
             continue
-        v = nc.createVariable('dT_'+t, 'f8', ('lev', 'lat', 'lon'))
-        v[:] = reorder_for_save(dT_out[t])
+        v = create_output_var('dT_'+t)
+        v[:] = clean_for_save(reorder_for_save(dT_out[t]))
     for t in terms + fortran_aer_species:
         if not _allowed(t):
             continue
         if t in frc_out:
-            v = nc.createVariable('frc_'+t, 'f8', ('lev', 'lat', 'lon'))
-            v[:] = reorder_for_save(frc_out[t])
+            v = create_output_var('frc_'+t)
+            v[:] = clean_for_save(reorder_for_save(frc_out[t]))
 
     # Compute and save observed dT
     nc_bp2 = Dataset(cfg['input']['base_pres'])
@@ -775,8 +857,16 @@ def main():
                     np.array(nc_bs2.variables['ts'][0, :, :], dtype=np.float64)
     nc_bp2.close(); nc_ap2.close(); nc_bs2.close(); nc_as2.close()
 
-    v = nc.createVariable('dT_observed', 'f8', ('lev', 'lat', 'lon'))
-    v[:] = reorder_for_save(dT_obs)
+    v = create_output_var('dT_observed')
+    v[:] = clean_for_save(reorder_for_save(dT_obs))
+
+    if planck_rcond:
+        # Provenance: which cells had cold-point near-null Planck directions
+        # truncated (0 = exact inverse, untouched). See radiation.planck_rcond.
+        v = nc.createVariable('planck_ntrunc', 'i4', ('lat', 'lon'))
+        v.long_name = 'number of Planck near-null SVD directions truncated (0=exact inverse)'
+        v.rcond = planck_rcond
+        v[:] = ntrunc_map.astype('i4')
 
     nc.close()
     print("Saved: %s" % outfile)

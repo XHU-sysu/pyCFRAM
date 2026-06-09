@@ -70,14 +70,22 @@ subroutine calc_drdt(nlayer, iaer, icld, co2, ch4, n2o, ps, ts, &
             drdt(ilayer, nlayer+1) = (fdl_p(nlayer+1)-ful_p(nlayer+1)) &
                                    - (fdl_m(nlayer+1)-ful_m(nlayer+1))
         end do
-        ! Surface ts ± 0.5K
+        ! Surface ts ± 0.5K — perturb ONLY ts (NOT t_atm[nlayer]).
+        ! RRTMG's rad_driver_lw uses tint_cfram(nlayer)=ts directly at the
+        ! surface interface (line ~90 of rad_driver_lw.f90), so ts and
+        ! t_atm[nlayer] are independent inputs. A previous "Fix #1" bundled
+        ! them, which contaminated drdt's surface row → wrong sign in
+        ! dT_lhflx/dT_shflx at lev=1000hPa (atm bottom) when surface forcing
+        ! propagates through J^{-1}. Reverted 2026-05-12 to preserve the
+        ! physical Planck Jacobian: ∂R/∂T_s and ∂R/∂T_atm[nlayer] stay separate.
+        t_pert(1:nlayer) = t(1:nlayer)
         ts_p = ts + dT_half
         call rad_driver_lw(nlayer, iaer, icld, co2, ch4, n2o, ps, ts_p, albedo_lw, &
-            plev, t, q, o3, cldfrac, cldlwc, cldiwc, tauaer_lw, &
+            plev, t_pert, q, o3, cldfrac, cldlwc, cldiwc, tauaer_lw, &
             fdl_p, ful_p, htr_lw_1k, lw_p)
         ts_m = ts - dT_half
         call rad_driver_lw(nlayer, iaer, icld, co2, ch4, n2o, ps, ts_m, albedo_lw, &
-            plev, t, q, o3, cldfrac, cldlwc, cldiwc, tauaer_lw, &
+            plev, t_pert, q, o3, cldfrac, cldlwc, cldiwc, tauaer_lw, &
             fdl_m, ful_m, htr_lw_1k, lw_m)
         drdt(nlayer+1, 1:nlayer) = lw_p(1:nlayer) - lw_m(1:nlayer)
         drdt(nlayer+1, nlayer+1) = (fdl_p(nlayer+1)-ful_p(nlayer+1)) &
@@ -93,9 +101,12 @@ subroutine calc_drdt(nlayer, iaer, icld, co2, ch4, n2o, ps, ts, &
             drdt(ilayer, 1:nlayer) = lw_p(1:nlayer) - lw_base(1:nlayer)
             drdt(ilayer, nlayer+1) = fdl_p(nlayer+1) - ful_p(nlayer+1) - (fdl_base(nlayer+1) - ful_base(nlayer+1))
         end do
+        ! Surface ts +1K — perturb ONLY ts (NOT t_atm[nlayer]). See note
+        ! above in centered_drdt branch for rationale (reverted Fix #1).
+        t_pert(1:nlayer) = t(1:nlayer)
         ts_p = ts + 1.0
         call rad_driver_lw(nlayer, iaer, icld, co2, ch4, n2o, ps, ts_p, albedo_lw, &
-            plev, t, q, o3, cldfrac, cldlwc, cldiwc, tauaer_lw, &
+            plev, t_pert, q, o3, cldfrac, cldlwc, cldiwc, tauaer_lw, &
             fdl_p, ful_p, htr_lw_1k, lw_p)
         drdt(nlayer+1, 1:nlayer) = lw_p(1:nlayer) - lw_base(1:nlayer)
         drdt(nlayer+1, nlayer+1) = fdl_p(nlayer+1) - ful_p(nlayer+1) - (fdl_base(nlayer+1) - ful_base(nlayer+1))

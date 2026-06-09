@@ -11,6 +11,10 @@ Usage:
     python scripts/download_merra2_aerosol.py --years 2003 2022 --month 8 \
         --outdir era5_data/merra2
 
+    python scripts/download_merra2_aerosol.py \
+        --year-list 1991 1992 1993 2023 --month 4 \
+        --outdir era5_data/india_wb23_merra2 --lat 8 37 --lon 63 112
+
 Output:
     era5_data/merra2/M2I3NVAER_{YYYYMMDD}.nc4  (one file per day)
 """
@@ -19,7 +23,42 @@ import os
 import sys
 import argparse
 import calendar
+import time
 from datetime import date
+import numpy as np
+
+try:
+    from netCDF4 import Dataset
+except ImportError:
+    Dataset = None
+
+
+def _is_valid_merra2_file(path, min_size, variables):
+    """Return True when a downloaded subset is readable and physically sane."""
+    if not os.path.exists(path) or os.path.getsize(path) < min_size:
+        return False
+    if Dataset is None:
+        return True
+
+    try:
+        with Dataset(path) as nc:
+            for dim in ('time', 'lev', 'lat', 'lon'):
+                if dim not in nc.dimensions or len(nc.dimensions[dim]) == 0:
+                    return False
+            for var in variables:
+                if var not in nc.variables:
+                    return False
+                values = nc.variables[var][:]
+                if getattr(values, 'mask', False) is not np.ma.nomask and np.ma.count_masked(values):
+                    return False
+                data = np.asarray(values)
+                if not np.all(np.isfinite(data)):
+                    return False
+                if var != 'DELP' and (np.min(data) < 0.0 or np.max(data) > 1e-5):
+                    return False
+    except Exception:
+        return False
+    return True
 
 
 def _merra2_stream(year):
@@ -81,10 +120,14 @@ def build_opendap_url(dt, variables, lat_range, lon_range):
 def download_day(dt, outdir, variables, lat_range, lon_range):
     """Download one day of MERRA-2 aerosol data."""
     outfile = os.path.join(outdir, f'M2I3NVAER_{dt.strftime("%Y%m%d")}.nc4')
+    tmpfile = f'{outfile}.{os.getpid()}.tmp'
     MIN_SIZE = 10 * 1024 * 1024  # 10 MB — valid MERRA-2 files are ~30-60 MB
-    if os.path.exists(outfile) and os.path.getsize(outfile) > MIN_SIZE:
+    MAX_ATTEMPTS = 4
+    if _is_valid_merra2_file(outfile, MIN_SIZE, variables):
         print(f'  {dt}: skip (exists, {os.path.getsize(outfile)/1e6:.1f} MB)')
         return True
+    if os.path.exists(outfile):
+        os.remove(outfile)
 
     url = build_opendap_url(dt, variables, lat_range, lon_range)
 
@@ -93,27 +136,37 @@ def download_day(dt, outdir, variables, lat_range, lon_range):
 
     # Use curl with Earthdata auth (.netrc) and -g to disable URL globbing
     cmd = (f'curl -s -g -n -c {cookie_file} -b {cookie_file} -L '
-           f'-o "{outfile}" "{url}"')
+           f'-o "{tmpfile}" "{url}"')
 
-    print(f'  {dt}: downloading...', flush=True)
-    ret = os.system(cmd)
-    if ret != 0:
-        # Try wget as fallback
-        cmd2 = (f'wget -q --auth-no-challenge '
-                f'--load-cookies {cookie_file} --save-cookies {cookie_file} '
-                f'--keep-session-cookies '
-                f'-O "{outfile}" "{url}"')
-        ret = os.system(cmd2)
+    cmd2 = (f'wget -q --auth-no-challenge '
+            f'--load-cookies {cookie_file} --save-cookies {cookie_file} '
+            f'--keep-session-cookies '
+            f'-O "{tmpfile}" "{url}"')
 
-    if ret != 0 or not os.path.exists(outfile) or os.path.getsize(outfile) < MIN_SIZE:
-        print(f'  {dt}: FAILED (ret={ret})')
-        if os.path.exists(outfile):
-            os.remove(outfile)
-        return False
+    ret = 1
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        print(f'  {dt}: downloading... attempt {attempt}/{MAX_ATTEMPTS}',
+              flush=True)
 
-    fsize = os.path.getsize(outfile) / 1e6
-    print(f'  {dt}: done ({fsize:.1f} MB)')
-    return True
+        for tool, command in (('curl', cmd), ('wget', cmd2)):
+            if os.path.exists(tmpfile):
+                os.remove(tmpfile)
+            ret = os.system(command)
+            if _is_valid_merra2_file(tmpfile, MIN_SIZE, variables):
+                os.replace(tmpfile, outfile)
+                fsize = os.path.getsize(outfile) / 1e6
+                print(f'  {dt}: done ({fsize:.1f} MB via {tool})')
+                return True
+            if os.path.exists(tmpfile):
+                os.remove(tmpfile)
+            if ret != 0:
+                print(f'  {dt}: {tool} returned {ret}', flush=True)
+
+        if attempt < MAX_ATTEMPTS:
+            time.sleep(10 * attempt)
+
+    print(f'  {dt}: FAILED after {MAX_ATTEMPTS} attempts (ret={ret})')
+    return False
 
 
 def main():
@@ -121,6 +174,8 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--years', type=int, nargs=2, default=[2003, 2022],
                         help='Year range (inclusive)')
+    parser.add_argument('--year-list', type=int, nargs='+', default=None,
+                        help='Explicit years to download; overrides --years')
     parser.add_argument('--month', type=int, default=8, help='Month to download')
     parser.add_argument('--outdir', default='era5_data/merra2',
                         help='Output directory')
@@ -142,18 +197,26 @@ def main():
         'DELP',                      # Layer pressure thickness (for vertical coord)
     ]
 
-    yr_start, yr_end = args.years
+    if args.year_list:
+        years = sorted(set(args.year_list))
+        yr_start, yr_end = years[0], years[-1]
+    else:
+        yr_start, yr_end = args.years
+        years = list(range(yr_start, yr_end + 1))
     total = 0
     failed = 0
 
     print(f'=== MERRA-2 M2I3NVAER Download ===')
-    print(f'Years: {yr_start}-{yr_end}, Month: {args.month}')
+    if args.year_list:
+        print(f'Years: {years}, Month: {args.month}')
+    else:
+        print(f'Years: {yr_start}-{yr_end}, Month: {args.month}')
     print(f'Domain: lat [{args.lat[0]}, {args.lat[1]}], lon [{args.lon[0]}, {args.lon[1]}]')
     print(f'Variables: {len(variables)}')
     print(f'Output: {args.outdir}')
     print()
 
-    for year in range(yr_start, yr_end + 1):
+    for year in years:
         ndays = calendar.monthrange(year, args.month)[1]
         print(f'Year {year} ({ndays} days):')
         for day in range(1, ndays + 1):

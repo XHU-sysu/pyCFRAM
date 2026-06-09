@@ -26,6 +26,27 @@ from scipy.interpolate import RegularGridInterpolator
 
 # MERRA-2 fixed top-of-atmosphere pressure (Pa)
 PTOP = 1.0  # 0.01 hPa = 1 Pa
+AEROSOL_RAW_MAX_KGKG = 1e-5
+DELP_MAX_PA = 2e4
+
+SPECIES_MAP = {
+    'bc':   ['BCPHILIC', 'BCPHOBIC'],
+    'ocphi': ['OCPHILIC'],
+    'ocpho': ['OCPHOBIC'],
+    'sulf': ['SO4'],
+    'ss':   ['SS001', 'SS002', 'SS003', 'SS004', 'SS005'],
+    'dust': ['DU001', 'DU002', 'DU003', 'DU004', 'DU005'],
+}
+
+
+def _as_float_with_nan(values):
+    """Convert netCDF data to float64 without leaking masked fill values."""
+    if np.ma.isMaskedArray(values):
+        with np.errstate(invalid='ignore', over='ignore'):
+            data = np.asarray(values.data, dtype=np.float64).copy()
+        data[np.ma.getmaskarray(values)] = np.nan
+        return data
+    return np.asarray(values, dtype=np.float64)
 
 
 def _load_merra2_day(filepath):
@@ -45,9 +66,13 @@ def _load_merra2_day(filepath):
     aer_vars = {}
     for v in aer_names:
         if v in nc.variables:
-            aer_vars[v] = np.array(nc.variables[v][:], dtype=np.float64)
+            values = _as_float_with_nan(nc.variables[v][:])
+            # Some OPeNDAP subsets contain unmasked fill/corrupt values.
+            values[(values < 0.0) | (values > AEROSOL_RAW_MAX_KGKG)] = np.nan
+            aer_vars[v] = values
 
-    delp = np.array(nc.variables['DELP'][:], dtype=np.float64)
+    delp = _as_float_with_nan(nc.variables['DELP'][:])
+    delp[(delp <= 0.0) | (delp > DELP_MAX_PA)] = np.nan
     lat = np.array(nc.variables['lat'][:], dtype=np.float64)
     lon = np.array(nc.variables['lon'][:], dtype=np.float64)
     lev = np.array(nc.variables['lev'][:], dtype=np.float64) if 'lev' in nc.variables else np.arange(72)
@@ -153,13 +178,16 @@ def _interp_horizontal(data_3d, lat_src, lon_src, lat_tgt, lon_tgt):
     """
     nlev = data_3d.shape[0]
     result = np.zeros((nlev, len(lat_tgt), len(lon_tgt)), dtype=np.float64)
+    lon_query = np.where(np.asarray(lon_tgt) > 180.0,
+                         np.asarray(lon_tgt) - 360.0,
+                         np.asarray(lon_tgt))
 
     for k in range(nlev):
         interp = RegularGridInterpolator(
             (lat_src, lon_src), data_3d[k],
             method='linear', bounds_error=False, fill_value=None)
         # Build target mesh
-        lat_grid, lon_grid = np.meshgrid(lat_tgt, lon_tgt, indexing='ij')
+        lat_grid, lon_grid = np.meshgrid(lat_tgt, lon_query, indexing='ij')
         pts = np.column_stack([lat_grid.ravel(), lon_grid.ravel()])
         result[k] = interp(pts).reshape(len(lat_tgt), len(lon_tgt))
 
@@ -190,18 +218,11 @@ def load_merra2_aerosol(data_dir, years, month, warm_days,
     nlon_tgt = len(target_lon)
     shape_tgt = (nlev_tgt, nlat_tgt, nlon_tgt)
 
-    # Species aggregation mapping
-    species_map = {
-        'bc': ['BCPHILIC', 'BCPHOBIC'],
-        'ocphi': ['OCPHILIC'],
-        'ocpho': ['OCPHOBIC'],
-        'sulf': ['SO4'],
-        'ss': ['SS001', 'SS002', 'SS003', 'SS004', 'SS005'],
-        'dust': ['DU001', 'DU002', 'DU003', 'DU004', 'DU005'],
-    }
+    species_map = SPECIES_MAP
 
     # Accumulate over years
     accum = {sp: np.zeros(shape_tgt, dtype=np.float64) for sp in species_map}
+    valid_count = {sp: np.zeros(shape_tgt, dtype=np.int32) for sp in species_map}
     count = 0
 
     if period == 'clim':
@@ -231,16 +252,22 @@ def load_merra2_aerosol(data_dir, years, month, warm_days,
             aer_vars, delp, lat_m2, lon_m2, _ = _load_merra2_day(fname)
 
             # Daily mean over 3-hourly steps (axis=0)
-            delp_daily = delp.mean(axis=0)
+            with np.errstate(invalid='ignore'):
+                delp_daily = np.nanmean(delp, axis=0)
             p_mid = _compute_pressure_midpoints(delp_daily)
 
             for sp, m2_vars in species_map.items():
                 # Sum contributing MERRA-2 variables, then daily mean
                 sp_data = np.zeros_like(delp)
+                found = False
                 for mv in m2_vars:
                     if mv in aer_vars:
                         sp_data += aer_vars[mv]
-                sp_daily = sp_data.mean(axis=0)  # (nlev, nlat, nlon)
+                        found = True
+                if not found:
+                    continue
+                with np.errstate(invalid='ignore'):
+                    sp_daily = np.nanmean(sp_data, axis=0)
 
                 # Vertical interpolation
                 sp_vinterp = _interp_vertical(sp_daily, p_mid,
@@ -268,8 +295,11 @@ def load_merra2_aerosol(data_dir, years, month, warm_days,
         # Average over warm days for this year
         for sp in species_map:
             if day_data[sp]:
-                yr_mean = np.mean(day_data[sp], axis=0)
-                accum[sp] += yr_mean
+                with np.errstate(invalid='ignore'):
+                    yr_mean = np.nanmean(day_data[sp], axis=0)
+                valid = np.isfinite(yr_mean)
+                accum[sp][valid] += yr_mean[valid]
+                valid_count[sp][valid] += 1
         count += 1
 
     if count == 0:
@@ -279,8 +309,125 @@ def load_merra2_aerosol(data_dir, years, month, warm_days,
     # Average over years
     result = {}
     for sp in species_map:
-        result[sp] = accum[sp] / count
+        result[sp] = np.divide(
+            accum[sp],
+            valid_count[sp],
+            out=np.zeros_like(accum[sp]),
+            where=valid_count[sp] > 0,
+        )
         # Ensure non-negative mixing ratios
         result[sp] = np.maximum(result[sp], 0.0)
+        max_abs = float(np.max(np.abs(result[sp])))
+        if not np.all(np.isfinite(result[sp])) or max_abs > AEROSOL_RAW_MAX_KGKG:
+            raise ValueError(
+                f"MERRA-2 aerosol {sp} failed sanity check: "
+                f"finite={np.all(np.isfinite(result[sp]))}, max={max_abs:.3e} kg/kg"
+            )
+
+    return result
+
+
+def load_merra2_aerosol_dates(data_dir, year_dates,
+                              target_plev_hpa, target_lat, target_lon,
+                              period='clim'):
+    """Load and process MERRA-2 aerosol for explicit calendar dates.
+
+    Args:
+        year_dates: dict mapping year -> [(month, day), ...].
+        period: 'clim' to average all keys in year_dates, or a single year.
+    """
+    target_plev_pa = target_plev_hpa * 100.0
+    shape_tgt = (len(target_plev_hpa), len(target_lat), len(target_lon))
+
+    species_map = SPECIES_MAP
+
+    accum = {sp: np.zeros(shape_tgt, dtype=np.float64) for sp in species_map}
+    valid_count = {sp: np.zeros(shape_tgt, dtype=np.int32) for sp in species_map}
+
+    if period == 'clim':
+        proc_items = sorted(year_dates.items())
+    else:
+        yr = int(period)
+        proc_items = [(yr, year_dates.get(yr, []))]
+
+    count = 0
+    for idx, (yr, dates) in enumerate(proc_items):
+        print(f"    MERRA-2: year {yr} ({idx+1}/{len(proc_items)})", flush=True)
+        day_data = {sp: [] for sp in species_map}
+        n_days_loaded = 0
+
+        for month, day in dates:
+            fname = os.path.join(data_dir, f'M2I3NVAER_{yr}{month:02d}{day:02d}.nc4')
+            if not os.path.exists(fname):
+                alt = glob.glob(os.path.join(data_dir, f'*{yr}{month:02d}{day:02d}*.nc4'))
+                if alt:
+                    fname = alt[0]
+                else:
+                    continue
+
+            aer_vars, delp, lat_m2, lon_m2, _ = _load_merra2_day(fname)
+
+            with np.errstate(invalid='ignore'):
+                delp_daily = np.nanmean(delp, axis=0)
+            p_mid = _compute_pressure_midpoints(delp_daily)
+
+            for sp, m2_vars in species_map.items():
+                sp_data = np.zeros_like(delp)
+                found = False
+                for mv in m2_vars:
+                    if mv in aer_vars:
+                        sp_data += aer_vars[mv]
+                        found = True
+                if not found:
+                    continue
+                with np.errstate(invalid='ignore'):
+                    sp_daily = np.nanmean(sp_data, axis=0)
+
+                sp_vinterp = _interp_vertical(sp_daily, p_mid, target_plev_pa)
+
+                if lat_m2[0] > lat_m2[-1]:
+                    sp_vinterp = sp_vinterp[:, ::-1, :]
+                    lat_sorted = lat_m2[::-1]
+                else:
+                    lat_sorted = lat_m2
+
+                sp_hinterp = _interp_horizontal(sp_vinterp, lat_sorted, lon_m2,
+                                                 target_lat, target_lon)
+                day_data[sp].append(sp_hinterp)
+
+            n_days_loaded += 1
+
+        if n_days_loaded == 0:
+            print(f"    Warning: no MERRA-2 data for {yr}")
+            continue
+
+        for sp in species_map:
+            if day_data[sp]:
+                with np.errstate(invalid='ignore'):
+                    yr_mean = np.nanmean(day_data[sp], axis=0)
+                valid = np.isfinite(yr_mean)
+                accum[sp][valid] += yr_mean[valid]
+                valid_count[sp][valid] += 1
+        count += 1
+
+    if count == 0:
+        print("  WARNING: No MERRA-2 data loaded. Using zero aerosol.")
+        return {sp: np.zeros(shape_tgt, dtype=np.float64) for sp in species_map}
+
+    result = {}
+    for sp in species_map:
+        result[sp] = np.divide(
+            accum[sp],
+            valid_count[sp],
+            out=np.zeros_like(accum[sp]),
+            where=valid_count[sp] > 0,
+        )
+        result[sp] = np.maximum(result[sp], 0.0)
+        max_abs = float(np.max(np.abs(result[sp])))
+        if not np.all(np.isfinite(result[sp])) or max_abs > AEROSOL_RAW_MAX_KGKG:
+            raise ValueError(
+                f"MERRA-2 aerosol {sp} failed sanity check: "
+                f"finite={np.all(np.isfinite(result[sp]))}, max={max_abs:.3e} kg/kg"
+            )
 
     return result

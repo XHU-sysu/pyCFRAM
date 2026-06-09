@@ -42,6 +42,26 @@ PLOT_ROWS = [
 ]
 
 
+def _ticks(v0, v1, step):
+    start = np.ceil(v0 / step) * step
+    stop = np.floor(v1 / step) * step
+    return np.arange(start, stop + 0.5 * step, step)
+
+
+def get_map_extent(case_cfg):
+    """Return [lon0, lon1, lat0, lat1] for the case map."""
+    plot_cfg = case_cfg.get('plot', {})
+    if 'map_extent' in plot_cfg:
+        me = plot_cfg['map_extent']
+        return me['lon'] + me['lat']
+    region = plot_cfg.get('extend_region') or plot_cfg.get('key_region')
+    if region:
+        lon0, lon1 = region['lon']
+        lat0, lat1 = region['lat']
+        return [lon0 - 5, lon1 + 5, lat0 - 5, lat1 + 5]
+    return [95, 125, 18, 42]
+
+
 def load_case_data(case_name):
     """Load self-computed results from NetCDF."""
     case_cfg = load_case(case_name)
@@ -62,33 +82,43 @@ def load_case_data(case_name):
     data['total'] = get('dT_observed')
     data['atmdyn'] = get('dT_atmdyn')
 
-    # Surface process = sfcdyn + lhflx + shflx (all via Planck matrix)
-    sfc_sum = np.zeros_like(data['total'])
-    for t in ['sfcdyn', 'lhflx', 'shflx']:
-        if 'dT_' + t in nc.variables:
-            arr = get('dT_' + t)
-            arr = np.nan_to_num(arr, nan=0.0)
-            sfc_sum += arr
-    data['sfc'] = sfc_sum
+    # Surface process = dT_sfcdyn. NOTE: sfcdyn already equals
+    # ocndyn + lhflx + shflx by construction (verified to ~1e-14), so it IS the
+    # full surface-process response. Adding lhflx+shflx again double-counts them
+    # (the previous behaviour) — use sfcdyn alone.
+    if 'dT_sfcdyn' in nc.variables:
+        data['sfc'] = get('dT_sfcdyn')
+    else:
+        sfc_sum = np.zeros_like(data['total'])
+        for t in ['lhflx', 'shflx']:
+            if 'dT_' + t in nc.variables:
+                sfc_sum += np.nan_to_num(get('dT_' + t), nan=0.0)
+        data['sfc'] = sfc_sum
 
     nc.close()
     return lats, lons, data
 
 
-def plot_panel(ax, lons, lats, field, title, norm, cmap, key_region=None):
-    ax.set_extent([95, 125, 18, 42], crs=ccrs.PlateCarree())
+def plot_panel(ax, lons, lats, field, title, norm, cmap,
+               extent, key_region=None, extend_region=None, contrast_region=None):
+    ax.set_extent(extent, crs=ccrs.PlateCarree())
     cf = ax.contourf(lons, lats, field, levels=LEVELS_DT, cmap=cmap, norm=norm,
                      transform=ccrs.PlateCarree(), extend='both')
     ax.coastlines(resolution='50m', linewidth=0.5)
     ax.add_feature(cfeature.BORDERS, linewidth=0.3, linestyle='-', edgecolor='gray')
-    if key_region:
-        lon0, lon1, lat0, lat1 = key_region
+    for region, color, lw in [
+            (extend_region, '0.25', 1.0),
+            (contrast_region, 'tab:orange', 1.2),
+            (key_region, 'tab:blue', 1.6)]:
+        if not region:
+            continue
+        lon0, lon1, lat0, lat1 = region
         ax.plot([lon0,lon1,lon1,lon0,lon0], [lat0,lat0,lat1,lat1,lat0],
-                'b-', linewidth=1.5, transform=ccrs.PlateCarree())
+                color=color, linewidth=lw, transform=ccrs.PlateCarree())
     gl = ax.gridlines(draw_labels=True, linewidth=0.3, color='gray', alpha=0.5, linestyle='--')
     gl.top_labels = False; gl.right_labels = False
-    gl.xlocator = plt.FixedLocator([95,100,105,110,115,120,125])
-    gl.ylocator = plt.FixedLocator([20,25,30,35,40])
+    gl.xlocator = plt.FixedLocator(_ticks(extent[0], extent[1], 10))
+    gl.ylocator = plt.FixedLocator(_ticks(extent[2], extent[3], 5))
     gl.xformatter = LongitudeFormatter(); gl.yformatter = LatitudeFormatter()
     gl.xlabel_style = {'size': 7}; gl.ylabel_style = {'size': 7}
     ax.set_title(title, fontsize=9, fontweight='bold')
@@ -114,10 +144,14 @@ def main():
     for col, case_name in enumerate(case_names):
         case_cfg = load_case(case_name)
         lats, lons, data = load_case_data(case_name)
-        key_region = case_cfg.get('plot', {}).get('key_region')
-        kr = None
-        if key_region:
-            kr = key_region['lon'] + key_region['lat']  # [lon0,lon1,lat0,lat1]
+        plot_cfg = case_cfg.get('plot', {})
+        extent = get_map_extent(case_cfg)
+        kr = plot_cfg.get('key_region')
+        er = plot_cfg.get('extend_region')
+        cr = plot_cfg.get('contrast_region')
+        kr = kr['lon'] + kr['lat'] if kr else None
+        er = er['lon'] + er['lat'] if er else None
+        cr = cr['lon'] + cr['lat'] if cr else None
         case_label = case_cfg.get('case_name', case_name.upper())
 
         for row, (key, label) in enumerate(PLOT_ROWS):
@@ -126,7 +160,8 @@ def main():
             field = np.clip(np.nan_to_num(field, nan=0), -20, 20)
             panel_label = labels_abc[row * ncols + col]
             title = "(%s) %s %s" % (panel_label, label, case_label)
-            plot_panel(ax, lons, lats, field, title, norm, CMAP, kr)
+            plot_panel(ax, lons, lats, field, title, norm, CMAP,
+                       extent, kr, er, cr)
 
     fig.subplots_adjust(bottom=0.06, top=0.96, left=0.06, right=0.94, hspace=0.25, wspace=0.15)
     cbar_ax = fig.add_axes([0.15, 0.02, 0.7, 0.015])

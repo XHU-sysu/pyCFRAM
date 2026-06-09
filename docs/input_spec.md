@@ -81,8 +81,14 @@ Legacy (path-B validation only, from Wu et al. `partial_forcing.nc`):
 ### Notes
 
 - Forcing convention: `F = flux_perturbed − flux_base`
-- For surface-only fluxes (LH, SH), typically only the surface level is nonzero
-- `sfcdyn`, `ocndyn`, `atmdyn` are **computed internally** in the Python runner from energy-balance residuals, not read from this file
+- `lhflx`/`shflx` are surface energy-budget terms: the runner reads the
+  `lev[0]` (surface) slice and places it on the **surface row only** of the
+  forcing vector (atmosphere rows = 0). This guarantees the identity
+  `dT_sfcdyn = dT_ocndyn + dT_lhflx + dT_shflx`. Do *not* expect a meaningful
+  vertical flux profile here — only the surface value is used.
+- `sfcdyn`, `ocndyn`, `atmdyn`, `dry` are **computed internally** in the Python
+  runner from the warm-state radiative imbalance `frc_full` (see
+  `docs/algorithm_spec.md` §8.1), not read from this file
 - Per-species aerosol forcings `bc/oc/sulf/seas/dust` are **optional legacy inputs** for comparison against Wu et al.; the standard ERA5+MERRA-2 pipeline instead produces per-species forcings inside the Fortran RRTMG engine (`dT_bc`, `dT_ocphi`, `dT_ocpho`, `dT_sulf`, `dT_ss`, `dT_dust`). When both are present, Fortran output takes precedence.
 - If this file is absent, pyCFRAM outputs only radiative decomposition terms
 

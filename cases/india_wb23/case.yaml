@@ -1,0 +1,59 @@
+# India-Bangladesh extreme wet heat event, April 17-20, 2023
+case_name: india_wb23
+description: "India-Bangladesh extreme wet heat core period, Apr 17-20, 2023"
+
+source:
+  type: era5_daily
+  # Absolute path: data lives on r074 disk, not in /home
+  data_dir: /disk/r074/lzhenn/workspace/ust-jumper/pyCFRAM/era5_data/india_wb23_ncar
+  temporal:
+    event_year: 2023
+    event_month: 4
+    clim_years: [1991, 2020]
+    # 0-based day indices within April: Apr 17-20 → indices 16,17,18,19
+    warm_days: [16, 17, 18, 19]
+  co2:
+    source: constant
+    # April climatological CO2 mean 1991-2020 ≈ 385 ppmv (verify if needed)
+    base_ppmv: 385.0
+    # April 2023 Mauna Loa monthly mean ≈ 421.3 ppmv
+    perturbed_ppmv: 421.3
+  aerosol:
+    source: merra2
+    data_dir: /disk/r074/lzhenn/workspace/ust-jumper/pyCFRAM/era5_data/india_wb23_merra2
+
+input:
+  base_pres: input/base_pres.nc
+  base_surf: input/base_surf.nc
+  perturbed_pres: input/perturbed_pres.nc
+  perturbed_surf: input/perturbed_surf.nc
+  nonrad_forcing: input/nonrad_forcing.nc
+
+radiation:
+  scheme: rrtmg
+  # Per-cell truncated-SVD regularisation of the Planck inverse. CFRAM is
+  # intrinsically ill-posed at the radiatively-inert tropical cold-point
+  # tropopause: drdt has a near-null singular direction that leaks an
+  # unphysical spike to the surface (the isolated 'specks' unlike their
+  # neighbours). planck_rcond drops ONLY those directions (sigma <
+  # rcond*sigma_max) per cell; well-conditioned cells keep the EXACT inverse
+  # (magnitudes unchanged). NC var planck_ntrunc records which cells were
+  # touched. Omit to disable (raw exact inverse). See session_log 2026-06.
+  planck_rcond: 1.0e-3
+
+run:
+  nproc: 80
+
+plot:
+  map_extent:
+    lon: [65, 110]
+    lat: [10, 35]
+  key_region:
+    lat: [20, 27]
+    lon: [85, 93]
+  extend_region:
+    lat: [15, 30]
+    lon: [75, 100]
+  contrast_region:
+    lat: [24, 32]
+    lon: [68, 78]
