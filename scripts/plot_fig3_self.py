@@ -82,14 +82,18 @@ def load_case_data(case_name):
     data['total'] = get('dT_observed')
     data['atmdyn'] = get('dT_atmdyn')
 
-    # Surface process = sfcdyn + lhflx + shflx (all via Planck matrix)
-    sfc_sum = np.zeros_like(data['total'])
-    for t in ['sfcdyn', 'lhflx', 'shflx']:
-        if 'dT_' + t in nc.variables:
-            arr = get('dT_' + t)
-            arr = np.nan_to_num(arr, nan=0.0)
-            sfc_sum += arr
-    data['sfc'] = sfc_sum
+    # Surface process = dT_sfcdyn. NOTE: sfcdyn already equals
+    # ocndyn + lhflx + shflx by construction (verified to ~1e-14), so it IS the
+    # full surface-process response. Adding lhflx+shflx again double-counts them
+    # (the previous behaviour) — use sfcdyn alone.
+    if 'dT_sfcdyn' in nc.variables:
+        data['sfc'] = get('dT_sfcdyn')
+    else:
+        sfc_sum = np.zeros_like(data['total'])
+        for t in ['lhflx', 'shflx']:
+            if 'dT_' + t in nc.variables:
+                sfc_sum += np.nan_to_num(get('dT_' + t), nan=0.0)
+        data['sfc'] = sfc_sum
 
     nc.close()
     return lats, lons, data

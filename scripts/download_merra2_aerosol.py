@@ -25,6 +25,40 @@ import argparse
 import calendar
 import time
 from datetime import date
+import numpy as np
+
+try:
+    from netCDF4 import Dataset
+except ImportError:
+    Dataset = None
+
+
+def _is_valid_merra2_file(path, min_size, variables):
+    """Return True when a downloaded subset is readable and physically sane."""
+    if not os.path.exists(path) or os.path.getsize(path) < min_size:
+        return False
+    if Dataset is None:
+        return True
+
+    try:
+        with Dataset(path) as nc:
+            for dim in ('time', 'lev', 'lat', 'lon'):
+                if dim not in nc.dimensions or len(nc.dimensions[dim]) == 0:
+                    return False
+            for var in variables:
+                if var not in nc.variables:
+                    return False
+                values = nc.variables[var][:]
+                if getattr(values, 'mask', False) is not np.ma.nomask and np.ma.count_masked(values):
+                    return False
+                data = np.asarray(values)
+                if not np.all(np.isfinite(data)):
+                    return False
+                if var != 'DELP' and (np.min(data) < 0.0 or np.max(data) > 1e-5):
+                    return False
+    except Exception:
+        return False
+    return True
 
 
 def _merra2_stream(year):
@@ -86,11 +120,14 @@ def build_opendap_url(dt, variables, lat_range, lon_range):
 def download_day(dt, outdir, variables, lat_range, lon_range):
     """Download one day of MERRA-2 aerosol data."""
     outfile = os.path.join(outdir, f'M2I3NVAER_{dt.strftime("%Y%m%d")}.nc4')
+    tmpfile = f'{outfile}.{os.getpid()}.tmp'
     MIN_SIZE = 10 * 1024 * 1024  # 10 MB — valid MERRA-2 files are ~30-60 MB
     MAX_ATTEMPTS = 4
-    if os.path.exists(outfile) and os.path.getsize(outfile) > MIN_SIZE:
+    if _is_valid_merra2_file(outfile, MIN_SIZE, variables):
         print(f'  {dt}: skip (exists, {os.path.getsize(outfile)/1e6:.1f} MB)')
         return True
+    if os.path.exists(outfile):
+        os.remove(outfile)
 
     url = build_opendap_url(dt, variables, lat_range, lon_range)
 
@@ -99,38 +136,37 @@ def download_day(dt, outdir, variables, lat_range, lon_range):
 
     # Use curl with Earthdata auth (.netrc) and -g to disable URL globbing
     cmd = (f'curl -s -g -n -c {cookie_file} -b {cookie_file} -L '
-           f'-o "{outfile}" "{url}"')
+           f'-o "{tmpfile}" "{url}"')
 
     cmd2 = (f'wget -q --auth-no-challenge '
             f'--load-cookies {cookie_file} --save-cookies {cookie_file} '
             f'--keep-session-cookies '
-            f'-O "{outfile}" "{url}"')
+            f'-O "{tmpfile}" "{url}"')
 
     ret = 1
     for attempt in range(1, MAX_ATTEMPTS + 1):
         print(f'  {dt}: downloading... attempt {attempt}/{MAX_ATTEMPTS}',
               flush=True)
-        ret = os.system(cmd)
-        if ret != 0:
-            ret = os.system(cmd2)
 
-        if os.path.exists(outfile) and os.path.getsize(outfile) >= MIN_SIZE:
-            break
+        for tool, command in (('curl', cmd), ('wget', cmd2)):
+            if os.path.exists(tmpfile):
+                os.remove(tmpfile)
+            ret = os.system(command)
+            if _is_valid_merra2_file(tmpfile, MIN_SIZE, variables):
+                os.replace(tmpfile, outfile)
+                fsize = os.path.getsize(outfile) / 1e6
+                print(f'  {dt}: done ({fsize:.1f} MB via {tool})')
+                return True
+            if os.path.exists(tmpfile):
+                os.remove(tmpfile)
+            if ret != 0:
+                print(f'  {dt}: {tool} returned {ret}', flush=True)
 
-        if os.path.exists(outfile):
-            os.remove(outfile)
         if attempt < MAX_ATTEMPTS:
             time.sleep(10 * attempt)
 
-    if ret != 0 or not os.path.exists(outfile) or os.path.getsize(outfile) < MIN_SIZE:
-        print(f'  {dt}: FAILED after {MAX_ATTEMPTS} attempts (ret={ret})')
-        if os.path.exists(outfile):
-            os.remove(outfile)
-        return False
-
-    fsize = os.path.getsize(outfile) / 1e6
-    print(f'  {dt}: done ({fsize:.1f} MB)')
-    return True
+    print(f'  {dt}: FAILED after {MAX_ATTEMPTS} attempts (ret={ret})')
+    return False
 
 
 def main():

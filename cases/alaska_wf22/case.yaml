@@ -1,0 +1,47 @@
+# Alaska wildfire aerosol-driven event, Jun 10-Jul 10, 2022
+case_name: alaska_wf22
+description: "Alaska wildfire aerosol-driven event, Jun 10-Jul 10, 2022"
+
+source:
+  type: era5_date_range
+  data_dir: /disk/r074/lzhenn/workspace/ust-jumper/pyCFRAM/era5_data/alaska_wf22_ncar
+  temporal:
+    event_year: 2022
+    clim_years: [1991, 2020]
+    start_mmdd: "06-10"
+    end_mmdd: "07-10"
+  co2:
+    source: constant
+    base_ppmv: 385.0
+    perturbed_ppmv: 420.0
+  aerosol:
+    source: merra2
+    data_dir: /disk/r074/lzhenn/workspace/ust-jumper/pyCFRAM/era5_data/alaska_wf22_merra2
+
+input:
+  base_pres: input/base_pres.nc
+  base_surf: input/base_surf.nc
+  perturbed_pres: input/perturbed_pres.nc
+  perturbed_surf: input/perturbed_surf.nc
+  nonrad_forcing: input/nonrad_forcing.nc
+
+radiation:
+  scheme: rrtmg
+  planck_rcond: 1.0e-3
+
+run:
+  nproc: 192
+
+plot:
+  map_extent:
+    lon: [183, 242]
+    lat: [56, 77]
+  main_fire_region:
+    lon: [190, 210]
+    lat: [58, 66]
+  extended_region:
+    lon: [185, 225]
+    lat: [60, 72]
+  arctic_response_region:
+    lon: [190, 240]
+    lat: [65, 75]

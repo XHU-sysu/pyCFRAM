@@ -1,22 +1,18 @@
-# India-Bangladesh extreme wet heat event, April 17-20, 2023
-case_name: india_wb23
-description: "India-Bangladesh extreme wet heat core period, Apr 17-20, 2023"
+# India-Bangladesh extreme wet heat event post-event phase, April 21-30, 2023
+case_name: india_wb23_post
+description: "India-Bangladesh wet-heat post-event decay and adjustment, Apr 21-30, 2023"
 
 source:
   type: era5_daily
-  # Absolute path: data lives on r074 disk, not in /home
   data_dir: /disk/r074/lzhenn/workspace/ust-jumper/pyCFRAM/era5_data/india_wb23_ncar
   temporal:
     event_year: 2023
     event_month: 4
     clim_years: [1991, 2020]
-    # 0-based day indices within April: Apr 17-20 → indices 16,17,18,19
-    warm_days: [16, 17, 18, 19]
+    warm_days: [20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
   co2:
     source: constant
-    # April climatological CO2 mean 1991-2020 ≈ 385 ppmv (verify if needed)
     base_ppmv: 385.0
-    # April 2023 Mauna Loa monthly mean ≈ 421.3 ppmv
     perturbed_ppmv: 421.3
   aerosol:
     source: merra2
@@ -42,7 +38,7 @@ radiation:
   planck_rcond: 1.0e-3
 
 run:
-  nproc: 80
+  nproc: 160
 
 plot:
   map_extent:

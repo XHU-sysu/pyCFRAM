@@ -57,7 +57,7 @@ def main():
             # Post-build: O3 inject + subsurface mask
             run_step('inject_cesm_o3.py',           ['--case', args.case])
             run_step('mask_subsurface_layers.py',   ['--case', args.case])
-        elif src_type in ('era5_daily', 'era5_merra2', None) and 'source' in cfg:
+        elif src_type in ('era5_daily', 'era5_date_range', 'era5_merra2', None) and 'source' in cfg:
             run_step('build_case_input.py', ['--case', args.case])
         else:
             print('No source block in case.yaml — skipping build step (input must be pre-supplied)')

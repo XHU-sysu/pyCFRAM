@@ -54,6 +54,28 @@ VAR_LONG_NAMES = {
     'albedo': 'Surface albedo',
 }
 
+AEROSOL_VARS = ['bc', 'ocphi', 'ocpho', 'sulf', 'ss', 'dust']
+AEROSOL_MAX_KGKG = 1e-5
+
+
+def validate_states(*states):
+    """Reject corrupt state arrays before they are written or run by CFRAM."""
+    for state_name, state in states:
+        for varname in PRES_3D_VARS + SURF_2D_VARS:
+            if varname not in state:
+                continue
+            data = np.asarray(state[varname])
+            if not np.all(np.isfinite(data)):
+                raise ValueError(f"{state_name}.{varname} contains non-finite values")
+            if varname in AEROSOL_VARS:
+                vmin = float(np.min(data))
+                vmax = float(np.max(data))
+                if vmin < 0.0 or vmax > AEROSOL_MAX_KGKG:
+                    raise ValueError(
+                        f"{state_name}.{varname} aerosol sanity check failed: "
+                        f"range=[{vmin:.3e}, {vmax:.3e}] kg/kg"
+                    )
+
 
 def write_pres_nc(filepath, state):
     """Write pressure-level variables to NetCDF."""
@@ -180,9 +202,12 @@ def write_nonrad_nc(filepath, state, nonrad):
         data_4d = np.full((1, nlev_out, len(lat), len(lon)), FILL, dtype=np.float64)
         # Surface value at lev[0]=1013
         data_4d[0, 0, :, :] = nonrad[varname]
-        v = nc.createVariable(varname, 'f8', ('time', 'lev', 'lat', 'lon'),
-                              zlib=True, complevel=4)
+        v = nc.createVariable(
+            varname, 'f8', ('time', 'lev', 'lat', 'lon'),
+            zlib=True, complevel=4, fill_value=FILL,
+        )
         v[:] = data_4d
+        v.missing_value = FILL
         v.units = 'W/m2'
         print(f"  {varname}: sfc mean={nonrad[varname].mean():.3f} W/m2")
 
@@ -224,6 +249,7 @@ def main():
         return
 
     base_state, pert_state, nonrad = source.build_states()
+    validate_states(('base', base_state), ('perturbed', pert_state))
 
     # Write output files — remove any existing symlinks first
     input_dir = os.path.join(cfg['_case_dir'], 'input')

@@ -29,6 +29,7 @@ raw/
 cases/*/output/
 cases/*/figures/
 cases/*/input/
+cases/*/logs/
 cases/*/input/*.bak_*
 cases/_remote_sync/
 cfram_output/

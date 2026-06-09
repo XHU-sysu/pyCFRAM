@@ -17,6 +17,8 @@ Data layout on disk (from CDS API download):
 """
 
 import os
+import calendar
+from datetime import date, timedelta
 import numpy as np
 from netCDF4 import Dataset
 
@@ -422,6 +424,210 @@ class ERA5DailySource(DataSource):
               f"{base_state['ps'].max():.0f}] Pa")
         print(f"  albedo range: [{base_state['albedo'].min():.3f}, "
               f"{base_state['albedo'].max():.3f}]")
+
+        dT_sfc = pert_state['ts'] - base_state['ts']
+        print(f"\nPerturbed - Base (surface T):")
+        print(f"  dTs range: [{dT_sfc.min():.2f}, {dT_sfc.max():.2f}] K")
+        print(f"  dTs mean:  {dT_sfc.mean():.2f} K")
+
+        return base_state, pert_state, nonrad
+
+
+def _parse_mmdd(value):
+    month, day = str(value).split('-')
+    return int(month), int(day)
+
+
+def _date_pairs_for_year(year, start_mmdd, end_mmdd):
+    sm, sd = _parse_mmdd(start_mmdd)
+    em, ed = _parse_mmdd(end_mmdd)
+    start = date(year, sm, sd)
+    end = date(year, em, ed)
+    if end < start:
+        raise ValueError(f"date range crosses year boundary: {start_mmdd}..{end_mmdd}")
+    out = []
+    cur = start
+    while cur <= end:
+        out.append((cur.month, cur.day))
+        cur += timedelta(days=1)
+    return out
+
+
+def _select_daily_mean_for_dates(loader, data_dir, var_or_year, year_or_dates,
+                                 dates=None):
+    """Load monthly ERA5 data and return selected daily means for dates."""
+    if dates is None:
+        # Surface form: loader(data_dir, year, month)
+        year = var_or_year
+        date_pairs = year_or_dates
+        var_short = None
+    else:
+        # PL form: loader(data_dir, var_short, year, month)
+        var_short = var_or_year
+        year = year_or_dates
+        date_pairs = dates
+
+    pieces = []
+    for month in sorted(set(m for m, _ in date_pairs)):
+        days = [d for m, d in date_pairs if m == month]
+        if var_short is None:
+            sl, _, _ = loader(data_dir, year, month)
+            month_daily = {}
+            for key, arr in sl.items():
+                if key in ('ssrd', 'ssr', 'tisr', 'slhf', 'sshf'):
+                    month_daily[key] = _sixhourly_accum_to_daily_wm2(arr)
+                else:
+                    month_daily[key] = _sixhourly_to_daily_mean(arr)
+            pieces.append((month, days, month_daily))
+        else:
+            arr, _, _, _ = loader(data_dir, var_short, year, month)
+            daily = _sixhourly_to_daily_mean(arr)
+            pieces.append((month, days, daily))
+    return pieces
+
+
+@register_source('era5_date_range')
+class ERA5DateRangeSource(DataSource):
+    """Build CFRAM states from ERA5 over an explicit MM-DD date range."""
+
+    def build_states(self):
+        tcfg = self.source_cfg['temporal']
+        event_year = int(tcfg['event_year'])
+        clim_start, clim_end = tcfg['clim_years']
+        clim_years = list(range(clim_start, clim_end + 1))
+        start_mmdd = tcfg['start_mmdd']
+        end_mmdd = tcfg['end_mmdd']
+
+        data_dir = self.source_cfg['data_dir']
+        if not os.path.isabs(data_dir):
+            from core.config import PROJECT_ROOT
+            data_dir = os.path.join(PROJECT_ROOT, data_dir)
+
+        date_pairs_event = _date_pairs_for_year(event_year, start_mmdd, end_mmdd)
+        year_dates = {yr: _date_pairs_for_year(yr, start_mmdd, end_mmdd)
+                      for yr in clim_years}
+        year_dates[event_year] = date_pairs_event
+        print(f"Date-range period: {start_mmdd}..{end_mmdd} ({len(date_pairs_event)} days)")
+
+        first_month = date_pairs_event[0][0]
+        _, lev, lat_raw, lon_raw = _load_pl(data_dir, 't', event_year, first_month)
+        lat_ascending = lat_raw[0] < lat_raw[-1]
+        lat = lat_raw if lat_ascending else lat_raw[::-1]
+        lon = lon_raw
+
+        nlev, nlat, nlon = len(lev), len(lat), len(lon)
+        print(f"Grid: {nlev} levels, {nlat} lat, {nlon} lon")
+
+        base_state = {'lat': lat, 'lon': lon, 'lev': lev}
+        pert_state = {'lat': lat, 'lon': lon, 'lev': lev}
+
+        for era5_var, cfram_var in PL_VAR_MAP.items():
+            print(f"  Processing PL: {era5_var} → {cfram_var}")
+            clim_sum = np.zeros((nlev, nlat, nlon), dtype=np.float64)
+            clim_count = 0
+            for yr in clim_years:
+                selected = []
+                for month, days, daily in _select_daily_mean_for_dates(
+                        _load_pl, data_dir, era5_var, yr, year_dates[yr]):
+                    idx = [d - 1 for d in days]
+                    selected.append(daily[idx])
+                yr_mean = np.concatenate(selected, axis=0).mean(axis=0)
+                if not lat_ascending:
+                    yr_mean = yr_mean[:, ::-1, :]
+                clim_sum += yr_mean
+                clim_count += 1
+            base_state[cfram_var] = clim_sum / clim_count
+
+            selected_ev = []
+            for month, days, daily in _select_daily_mean_for_dates(
+                    _load_pl, data_dir, era5_var, event_year, date_pairs_event):
+                selected_ev.append(daily[[d - 1 for d in days]])
+            pert_mean = np.concatenate(selected_ev, axis=0).mean(axis=0)
+            if not lat_ascending:
+                pert_mean = pert_mean[:, ::-1, :]
+            pert_state[cfram_var] = pert_mean
+
+        print("  Processing SL variables...")
+        sl_keys = ['skt', 'sp', 'ssrd', 'ssr', 'tisr', 'slhf', 'sshf']
+        sl_clim = {k: np.zeros((nlat, nlon), dtype=np.float64) for k in sl_keys}
+        sl_count = 0
+        for yr in clim_years:
+            selected = {k: [] for k in sl_keys}
+            for month, days, month_daily in _select_daily_mean_for_dates(
+                    _load_sl, data_dir, yr, year_dates[yr]):
+                idx = [d - 1 for d in days]
+                for key in sl_keys:
+                    if key in month_daily:
+                        selected[key].append(month_daily[key][idx])
+            for key in sl_keys:
+                if selected[key]:
+                    mean = np.concatenate(selected[key], axis=0).mean(axis=0)
+                    if not lat_ascending:
+                        mean = mean[::-1, :]
+                    sl_clim[key] += mean
+            sl_count += 1
+        for key in sl_keys:
+            sl_clim[key] /= sl_count
+
+        selected_ev = {k: [] for k in sl_keys}
+        for month, days, month_daily in _select_daily_mean_for_dates(
+                _load_sl, data_dir, event_year, date_pairs_event):
+            idx = [d - 1 for d in days]
+            for key in sl_keys:
+                if key in month_daily:
+                    selected_ev[key].append(month_daily[key][idx])
+        sl_ev = {}
+        for key in sl_keys:
+            if selected_ev[key]:
+                mean = np.concatenate(selected_ev[key], axis=0).mean(axis=0)
+                if not lat_ascending:
+                    mean = mean[::-1, :]
+                sl_ev[key] = mean
+
+        for label, sl_data in [('base', sl_clim), ('perturbed', sl_ev)]:
+            state = base_state if label == 'base' else pert_state
+            state['ts'] = sl_data['skt']
+            state['ps'] = sl_data['sp']
+            state['solar'] = sl_data['tisr']
+            ssrd = sl_data['ssrd']
+            ssr = sl_data['ssr']
+            albedo = np.where(ssrd > 0, (ssrd - ssr) / ssrd, 0.2)
+            state['albedo'] = np.clip(albedo, 0.0, 1.0)
+
+        nonrad = {}
+        if 'slhf' in sl_ev and 'sshf' in sl_ev:
+            nonrad['lhflx'] = np.nan_to_num(sl_ev['slhf'] - sl_clim['slhf'])
+            nonrad['shflx'] = np.nan_to_num(sl_ev['sshf'] - sl_clim['sshf'])
+            print(f"  lhflx forcing: mean={nonrad['lhflx'].mean():.3f} W/m2")
+            print(f"  shflx forcing: mean={nonrad['shflx'].mean():.3f} W/m2")
+
+        co2_base = self.get_co2('base')
+        co2_pert = self.get_co2('perturbed')
+        shape_3d = (nlev, nlat, nlon)
+        base_state['co2'] = np.full(shape_3d, co2_base, dtype=np.float64)
+        pert_state['co2'] = np.full(shape_3d, co2_pert, dtype=np.float64)
+        print(f"  CO2: base={co2_base*1e6:.1f} ppmv, perturbed={co2_pert*1e6:.1f} ppmv")
+
+        aer_src = self.source_cfg.get('aerosol', {}).get('source', 'zero')
+        print(f"  Aerosol: {aer_src}")
+        if aer_src == 'merra2':
+            from .merra2_aerosol import load_merra2_aerosol_dates
+            aer_cfg = self.source_cfg.get('aerosol', {})
+            m2_dir = aer_cfg.get('data_dir', 'era5_data/merra2')
+            if not os.path.isabs(m2_dir):
+                from core.config import PROJECT_ROOT
+                m2_dir = os.path.join(PROJECT_ROOT, m2_dir)
+            aer_base = load_merra2_aerosol_dates(
+                m2_dir, {yr: year_dates[yr] for yr in clim_years},
+                lev, lat, lon, period='clim')
+            aer_pert = load_merra2_aerosol_dates(
+                m2_dir, {event_year: date_pairs_event},
+                lev, lat, lon, period=event_year)
+        else:
+            aer_base = self.get_aerosol(shape_3d, period='base')
+            aer_pert = self.get_aerosol(shape_3d, period='perturbed')
+        base_state.update(aer_base)
+        pert_state.update(aer_pert)
 
         dT_sfc = pert_state['ts'] - base_state['ts']
         print(f"\nPerturbed - Base (surface T):")

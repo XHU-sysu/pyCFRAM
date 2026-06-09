@@ -15,8 +15,9 @@ Output layout matches data/era5_source.py:
 """
 
 import argparse
+import calendar
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -49,9 +50,19 @@ PL_VARS = {
     "ciwc": ("128_247_ciwc", "CIWC"),
 }
 
+DIAG_PL_VARS = {
+    "u": ("128_131_u", "U"),
+    "v": ("128_132_v", "V"),
+}
+
 INSTANT_VARS = {
     "skt": ("128_235_skt", "SKT"),
     "sp": ("128_134_sp", "SP"),
+}
+
+DIAG_INSTANT_VARS = {
+    "t2m": ("128_167_2t", "VAR_2T"),
+    "d2m": ("128_168_2d", "VAR_2D"),
 }
 
 ACCUM_VARS = {
@@ -78,14 +89,17 @@ def s3_path(*parts):
     return "/".join([BUCKET, *parts])
 
 
-def yyyymm(year, month=MONTH):
+def yyyymm(year, month=None):
+    if month is None:
+        month = MONTH
     return f"{year}{month:02d}"
 
 
 def _wanted_times(year):
+    last_day = calendar.monthrange(year, MONTH)[1]
     return pd.date_range(
         f"{year}-{MONTH:02d}-01 00:00",
-        f"{year}-{MONTH:02d}-30 18:00",
+        f"{year}-{MONTH:02d}-{last_day:02d} 18:00",
         freq="6h",
     )
 
@@ -128,9 +142,12 @@ def _write_dataset(path, data_vars, coords, attrs=None, overwrite=False):
     print(f"  wrote {path} ({size:.1f} MB)", flush=True)
 
 
-def download_pl_var(fs, year, var_short, overwrite=False, dry_run=False):
+def download_pl_var(fs, year, var_short, overwrite=False, dry_run=False,
+                    var_table=None):
     ym = yyyymm(year)
-    code, ncar_name = PL_VARS[var_short]
+    var_table = var_table or PL_VARS
+    code, ncar_name = var_table[var_short]
+    grid = "ll025uv" if var_short in ("u", "v") else "ll025sc"
     out = os.path.join(OUTDIR, f"era5_pl_{var_short}_{ym}.nc")
     if os.path.exists(out) and not overwrite:
         print(f"  SKIP  PL {var_short} {ym}")
@@ -140,11 +157,12 @@ def download_pl_var(fs, year, var_short, overwrite=False, dry_run=False):
         return
 
     parts = []
-    for day in range(1, 31):
+    last_day = calendar.monthrange(year, MONTH)[1]
+    for day in range(1, last_day + 1):
         d0 = f"{ym}{day:02d}00"
         d1 = f"{ym}{day:02d}23"
         path = s3_path("e5.oper.an.pl", ym,
-                       f"e5.oper.an.pl.{code}.ll025sc.{d0}_{d1}.nc")
+                       f"e5.oper.an.pl.{code}.{grid}.{d0}_{d1}.nc")
         handle, ds = _open_dataset(fs, path)
         try:
             da = _sel_region(ds[ncar_name].isel(time=[0, 6, 12, 18])).load()
@@ -169,27 +187,39 @@ def download_pl_var(fs, year, var_short, overwrite=False, dry_run=False):
     )
 
 
-def download_instant_sl(fs, year, overwrite=False, dry_run=False):
+def download_instant_sl(fs, year, overwrite=False, dry_run=False,
+                        var_table=None, out_name="data_stream-oper_stepType-instant.nc"):
     ym = yyyymm(year)
     sl_dir = os.path.join(OUTDIR, f"era5_sl_{ym}")
-    out = os.path.join(sl_dir, "data_stream-oper_stepType-instant.nc")
+    out = os.path.join(sl_dir, out_name)
     if os.path.exists(out) and not overwrite:
-        print(f"  SKIP  SL instant {ym}")
+        print(f"  SKIP  SL instant {ym} {out_name}")
         return
-    print(f"  SL instant {ym}", flush=True)
+    print(f"  SL instant {ym} {out_name}", flush=True)
     if dry_run:
         return
 
+    var_table = var_table or INSTANT_VARS
     data_vars = {}
     coords = None
-    for out_name, (code, ncar_name) in INSTANT_VARS.items():
+    last_day = calendar.monthrange(year, MONTH)[1]
+    for out_var, (code, ncar_name) in var_table.items():
         path = s3_path("e5.oper.an.sfc", ym,
-                       f"e5.oper.an.sfc.{code}.ll025sc.{ym}0100_{ym}3023.nc")
+                       f"e5.oper.an.sfc.{code}.ll025sc."
+                       f"{ym}0100_{ym}{last_day:02d}23.nc")
         handle, ds = _open_dataset(fs, path)
         try:
+            if ncar_name not in ds.variables:
+                candidates = [v for v in ds.variables
+                              if v not in ("time", "latitude", "longitude")]
+                if len(candidates) == 1:
+                    ncar_name = candidates[0]
+                else:
+                    raise KeyError(
+                        f"{path}: cannot find {ncar_name}; candidates={candidates}")
             da = _sel_region(ds[ncar_name].isel(time=slice(0, None, 6))).load()
             da = da.astype("float32")
-            data_vars[out_name] = da
+            data_vars[out_var] = da
             if coords is None:
                 coords = {
                     "time": da.time,
@@ -205,14 +235,18 @@ def download_instant_sl(fs, year, overwrite=False, dry_run=False):
 
 def _boundary_month_paths(stream, year, code):
     ym = yyyymm(year)
-    prev = f"{year}{MONTH - 1:02d}"
+    first_day = datetime(year, MONTH, 1)
+    prev_day = first_day - timedelta(days=1)
+    next_month = (first_day.replace(day=28) + timedelta(days=4)).replace(day=1)
+    prev = yyyymm(prev_day.year, prev_day.month)
+    nxt = yyyymm(next_month.year, next_month.month)
     return [
         s3_path(stream, prev,
                 f"{stream}.{code}.ll025sc.{prev}1606_{ym}0106.nc"),
         s3_path(stream, ym,
                 f"{stream}.{code}.ll025sc.{ym}0106_{ym}1606.nc"),
         s3_path(stream, ym,
-                f"{stream}.{code}.ll025sc.{ym}1606_{year}{MONTH + 1:02d}0106.nc"),
+                f"{stream}.{code}.ll025sc.{ym}1606_{nxt}0106.nc"),
     ]
 
 
@@ -353,6 +387,17 @@ def download_year(fs, year, overwrite=False, dry_run=False):
     download_max_sl(fs, year, overwrite, dry_run)
 
 
+def download_diag_year(fs, year, overwrite=False, dry_run=False):
+    print(f"\n=== diagnostics {year} ===", flush=True)
+    for var_short in DIAG_PL_VARS:
+        download_pl_var(fs, year, var_short, overwrite, dry_run,
+                        var_table=DIAG_PL_VARS)
+    download_instant_sl(
+        fs, year, overwrite, dry_run,
+        var_table=DIAG_INSTANT_VARS,
+        out_name="data_stream-oper_stepType-instant_diag.nc")
+
+
 def main():
     global OUTDIR
 
@@ -362,6 +407,8 @@ def main():
     ap.add_argument("--outdir", default=OUTDIR)
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--mode", choices=("cfram", "diag", "all"), default="cfram",
+                    help="cfram: original pyCFRAM inputs; diag: u/v + t2m/d2m; all: both")
     args = ap.parse_args()
 
     OUTDIR = args.outdir
@@ -378,7 +425,10 @@ def main():
     fs = None if args.dry_run else s3fs.S3FileSystem(
         anon=True, default_fill_cache=False, default_cache_type="none")
     for year in years:
-        download_year(fs, year, args.overwrite, args.dry_run)
+        if args.mode in ("cfram", "all"):
+            download_year(fs, year, args.overwrite, args.dry_run)
+        if args.mode in ("diag", "all"):
+            download_diag_year(fs, year, args.overwrite, args.dry_run)
 
 
 if __name__ == "__main__":
