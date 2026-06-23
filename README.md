@@ -15,7 +15,7 @@ For the CFRAM methodology, please refer to:
 - Lu, J., and M. Cai, 2009: A new framework for isolating individual feedback processes in coupled general circulation climate models. *Climate Dynamics*.
 - Cai, M., and J. Lu, 2009: A new framework for isolating individual feedback processes in coupled general circulation climate models. Part II. *Climate Dynamics*.
 
-For a related approach (CFRAM-A) using RRTMG with aerosol independently developed by Zhang et al. (2022):
+For a related approach using RRTMG with aerosol:
 - Zhang, T., Deng, Y., Chen, J., Yang, S., Gao, P. and Zhang, H., 2022. Disentangling physical and dynamical drivers of the 2016/17 record-breaking warm winter in China. *Environmental Research Letters*, 17(7), 074024.
 - Wu, Q., Li, Q., Zhang, T., Sun, X., Yang, S. and Hu, X., 2025. Quantitative attribution of 2013 and 2022 extremely hot events in China: insights from a climate feedback–response perspective. *Journal of Climate*, 38(17), pp.4331–4349.
 
@@ -330,9 +330,3 @@ See [docs/input_spec.md](docs/input_spec.md) for the standard NetCDF input forma
 **CFRAM methodology**
 - Lu, J. and Cai, M., 2009. A new framework for isolating individual feedback processes in coupled general circulation climate models. Part I: Formulation. *Climate Dynamics*, 32, 873–885.
 - Cai, M. and Lu, J., 2009. A new framework for isolating individual feedback processes in coupled general circulation climate models. Part II: Method demonstrations and comparisons. *Climate Dynamics*, 32, 887–900.
-
-**CFRAM-A: RRTMG with aerosol**
-- Zhang, T., Deng, Y., Chen, J., Yang, S., Gao, P. and Zhang, H., 2022. Disentangling physical and dynamical drivers of the 2016/17 record-breaking warm winter in China. *Environmental Research Letters*, 17(7), 074024. https://doi.org/10.1088/1748-9326/ac79c1
-
-**CFRAM-A applications (extreme-event attribution)**
-- Wu, Q., Li, Q., Zhang, T., Sun, X., Yang, S. and Hu, X., 2025. Quantitative attribution of 2013 and 2022 extremely hot events in China: insights from a climate feedback–response perspective. *Journal of Climate*, 38(17), pp.4331–4349.
