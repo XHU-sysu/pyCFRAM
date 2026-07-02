@@ -309,6 +309,17 @@ pyCFRAM/
 | `scripts/validate_vs_paper.py` | Surface dT comparison vs Wu et al. results |
 | `scripts/diag_cloud_column.py` / `diag_drdt_singlecol.py` | Single-column rad/Planck-matrix dumps for debugging |
 
+### Lapse-Rate kernel module
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/compute_lr_kernel.py` | M2: native ΔR_LR/ΔR_PL from `dT_observed`, per configured kernel (default CloudSat=Kramer + GFDL) |
+| `scripts/validate_lr_vs_climkern.py` | M2: cross-validate against ClimKern's `calc_T_feedbacks` (needs `pycfram-kern` env) |
+| `scripts/plot_lr_comparison.py` | M2: native/ClimKern/diff triptych + Kramer-vs-GFDL difference maps |
+| `scripts/compute_lr_attribution.py` | M3: per-physical-process (`dT_q`, `dT_atmdyn`, ...) lapse-rate attribution |
+| `scripts/plot_lr_attribution.py` | M3: per-process attribution maps + zonal-mean profile |
+| `data/kernel_source.py` | Stage CloudSat/GFDL kernel NetCDFs from the climkern install into `data/kernels/` |
+
 ## Decomposition Output
 
 `cases/<case>/output/cfram_result.nc` contains partial temperature changes `dT_*` and the underlying radiative forcings `frc_*` (W/m²), shape `(lev, lat, lon)` with surface at `lev[-1]`:
@@ -320,6 +331,25 @@ pyCFRAM/
 | Aerosol species | `bc`, `ocphi`, `ocpho`, `sulf`, `ss`, `dust` — sum ≈ bulk (small non-linear residual) |
 | Non-radiative | `lhflx`, `shflx` (forcing placed on surface row only) |
 | Derived | `atmdyn`, `sfcdyn`, `ocndyn`, `dry`, `observed` — `dry = atmdyn + sfcdyn`, `sfcdyn = ocndyn + lhflx + shflx` (exact) |
+
+## Lapse-Rate Kernel Module (M2/M3)
+
+A radiative-kernel Lapse-Rate/Planck decomposition, cross-validated against [ClimKern](https://github.com/tylerjanoski/climkern)'s `calc_T_feedbacks` — see [docs/m2_kernel_module.md](docs/m2_kernel_module.md) for the full write-up and [docs/m3_methodology_comparison.md](docs/m3_methodology_comparison.md) for the CFRAM-vs-kernel-method comparison + per-process attribution.
+
+```bash
+# Native module only (numpy/scipy/netCDF4, no xesmf needed):
+python scripts/compute_lr_kernel.py cesm2_4xco2_official
+python scripts/compute_lr_attribution.py cesm2_4xco2_official   # M3 route i: per-process attribution
+
+# Cross-validation against ClimKern (needs the `pycfram-kern` conda env, see docs/m2_kernel_module.md §Environment):
+conda activate pycfram-kern
+python scripts/validate_lr_vs_climkern.py cesm2_4xco2_official
+python scripts/plot_lr_comparison.py cesm2_4xco2_official
+
+# Or via run_case.py:
+python run_case.py cesm2_4xco2_official --step lr
+python run_case.py cesm2_4xco2_official --step lr-attr
+```
 
 ## Input Data Format
 

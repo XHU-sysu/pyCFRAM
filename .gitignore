@@ -4,6 +4,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.coverage
+.pytest_cache/
 
 # Fortran compiled artifacts
 *.o
@@ -50,6 +52,9 @@ temp.md
 CLAUDE.md
 .claude/
 tasks/
+
+# Radiative kernel data (staged from climkern install, see data/kernel_source.py)
+data/kernels/
 
 # PDF / large binary
 *.pdf

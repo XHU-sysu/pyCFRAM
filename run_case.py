@@ -32,7 +32,7 @@ def run_step(script, args_list):
 def main():
     parser = argparse.ArgumentParser(description='pyCFRAM: run CFRAM decomposition')
     parser.add_argument('case', help='Case name (directory under cases/)')
-    parser.add_argument('--step', choices=['build', 'run', 'plot', 'all'],
+    parser.add_argument('--step', choices=['build', 'run', 'plot', 'lr', 'lr-attr', 'all'],
                         default='all', help='Which step to run (default: all)')
     parser.add_argument('--nproc', type=int, default=None,
                         help='Number of parallel workers (default: from config or all CPUs)')
@@ -73,6 +73,12 @@ def main():
 
     if 'plot' in steps:
         run_step('plot_fig3_independent.py', [args.case])
+
+    if 'lr' in steps:
+        run_step('compute_lr_kernel.py', [args.case])
+
+    if 'lr-attr' in steps:
+        run_step('compute_lr_attribution.py', [args.case])
 
     print("\n" + "=" * 60)
     print("Done! Results in: cases/%s/output/ and cases/%s/figures/" % (args.case, args.case))
