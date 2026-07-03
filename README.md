@@ -334,7 +334,7 @@ pyCFRAM/
 
 ## Lapse-Rate Kernel Module (M2/M3)
 
-A radiative-kernel Lapse-Rate/Planck decomposition, cross-validated against [ClimKern](https://github.com/tylerjanoski/climkern)'s `calc_T_feedbacks` — see [docs/m2_kernel_module.md](docs/m2_kernel_module.md) for the full write-up and [docs/m3_methodology_comparison.md](docs/m3_methodology_comparison.md) for the CFRAM-vs-kernel-method comparison + per-process attribution.
+A radiative-kernel Lapse-Rate/Planck decomposition, cross-validated against [ClimKern](https://github.com/tyfolino/climkern)'s `calc_T_feedbacks` — see [docs/m2_kernel_module.md](docs/m2_kernel_module.md) for the full write-up and [docs/m3_methodology_comparison.md](docs/m3_methodology_comparison.md) for the CFRAM-vs-kernel-method comparison + per-process attribution.
 
 ```bash
 # Native module only (numpy/scipy/netCDF4, no xesmf needed):

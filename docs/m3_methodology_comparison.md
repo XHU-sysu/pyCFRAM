@@ -116,6 +116,19 @@ consistent with the magnitude of those previously-documented CFRAM
 non-linearity residuals; it is reported per-kernel in `lr_attribution.nc`
 rather than being forced to zero.
 
+**Important nuance (the ~22% is spatial, not a mean bias).** The residual
+above is a *pointwise* `mean(|total − Σ_X|)`. The area-weighted **domain
+mean** of `Σ_X ΔR_LR^{(X)}` (−4.356 W m⁻², CloudSat) matches the domain
+mean of the M2 total from `dT_observed` (−4.335 W m⁻²) to **< 0.5 %** —
+i.e. the per-process attribution is essentially exact in the global mean,
+and the 22 % is scatter that cancels spatially (concentrated where
+adjacent processes locally over/under-shoot each other). Per-process
+domain means (CloudSat, W m⁻²): `q`=+9.09, `lhflx`=−10.43, `atmdyn`=−4.80,
+`ocndyn`=−2.99, `albedo`=+2.82, `shflx`=+1.69, `co2`=+1.42, `cloud`=−1.16,
+`o3`/`solar`/`aerosol`≈0. Water vapor is the dominant positive term and
+latent-heat-flux the dominant negative term; their partial cancellation
+plus the dynamical/ocean terms yields the modestly-negative net LR.
+
 **Qualitative pattern** (`fig_lr_attribution_CloudSat.png`,
 `fig_lr_zonal_profile.png`):
 - `q` (water vapor) dominates the tropical/subtropical lapse-rate

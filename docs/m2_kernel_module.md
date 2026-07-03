@@ -2,7 +2,7 @@
 
 Implements the radiative-kernel Lapse-Rate/Planck decomposition specified in
 `contract/contract_10.pdf` M2, cross-validated against
-[ClimKern](https://github.com/tylerjanoski/climkern) v1.2's `calc_T_feedbacks`
+[ClimKern](https://github.com/tyfolino/climkern) v1.2's `calc_T_feedbacks`
 (Janoski et al., GMD 2025). See `docs/plan.md` for the full execution plan
 this module was built against.
 
