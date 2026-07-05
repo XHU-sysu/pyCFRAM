@@ -49,15 +49,27 @@ def main():
     steps = ['build', 'run', 'plot'] if args.step == 'all' else [args.step]
 
     if 'build' in steps:
-        # Dispatch on source.type: ERA5 reanalysis → build_case_input.py;
-        # cesm2_cmip6 → build_cesm2_official.py; absent → skip (input pre-supplied).
+        # Dispatch on source.type:
+        #   - cesm2_cmip6 → the bespoke path-B build sequence (build_cesm2_official.py
+        #     + inject_cesm_o3.py + mask_subsurface_layers.py). Kept as an explicit
+        #     branch, untouched, because those three scripts are not registered
+        #     DataSource plugins and must stay on their own build-after-hook flow
+        #     (docs/plan_ph3.md §2.1/§2.4).
+        #   - any other source.type (ERA5 variants, cmip6_damip, and any future
+        #     registered plugin) → the generic writer build_case_input.py (path A).
+        #     build_case_input.py itself resolves and imports the right plugin
+        #     module and will raise a clear "Unknown source type" error if the
+        #     type was never registered — run_case.py does not need to know the
+        #     registry to dispatch here.
+        #   - source.type unset/None → input is pre-supplied, skip build (unchanged
+        #     behavior).
         src_type = cfg.get('source', {}).get('type')
         if src_type == 'cesm2_cmip6':
             run_step('build_cesm2_official.py', ['--case', args.case])
             # Post-build: O3 inject + subsurface mask
             run_step('inject_cesm_o3.py',           ['--case', args.case])
             run_step('mask_subsurface_layers.py',   ['--case', args.case])
-        elif src_type in ('era5_daily', 'era5_date_range', 'era5_merra2', None) and 'source' in cfg:
+        elif src_type is not None:
             run_step('build_case_input.py', ['--case', args.case])
         else:
             print('No source block in case.yaml — skipping build step (input must be pre-supplied)')
