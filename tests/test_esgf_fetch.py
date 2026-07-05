@@ -19,25 +19,27 @@ Also covers compute_checksum, write_manifest/read_manifest, and fetch()'s
 control flow (existing-file short-circuits, checksum mismatch/redownload,
 HTTP error handling).
 
-Two genuine (pre-existing, NOT introduced or fixed by this test pass) bugs
-were found while writing these tests. Per the WP-M4.6 brief they are
-documented/reproduced here, not fixed (production code is out of scope for
-this pass) -- see the two tests marked "KNOWN ISSUE" below, and the
-corresponding docstrings, for details:
+Two genuine bugs were found while writing these tests (WP-M4.6) and fixed
+immediately after in the same session (not left for a separate pass, since
+both were straightforward, well-understood, and mattered for the M4/M5
+downloads' reliability):
   - list_files(): when Solr's `url` field is multi-valued (a list, one
-    pipe-string per access service -- the documented ESGF schema), only
-    url_str[0] is ever inspected. If HTTPServer isn't the first service in
-    the list (Solr gives no ordering guarantee), the file is silently
-    dropped from the result instead of being found further down the list.
-  - fetch(): the HTTP-Range "resume" path is unreachable dead code. By the
-    time the download block runs, dest_path.exists() is always False
-    (either the file never existed, or the checksum-mismatch branch just
-    unlinked it) -- so `resume` never adds a Range header and mode is
-    always 'wb', never 'ab'. A knock-on effect: a pre-existing file with NO
-    checksum recorded is unconditionally trusted as "complete" (even a
-    truncated partial download from an interrupted run), and an HTTP 416
-    response on a fresh (no pre-existing file) attempt makes fetch()
-    return True without ever creating the destination file.
+    pipe-string per access service -- the documented ESGF schema), it used
+    to only inspect url_str[0]. If HTTPServer wasn't the first service in
+    the list (Solr gives no ordering guarantee), the file was silently
+    dropped instead of being found further down the list. Fixed to scan
+    every entry; see test_list_files_url_as_list_scans_all_entries_for_httpserver.
+  - fetch(): the HTTP-Range "resume" path used to be unreachable dead code
+    (dest_path.exists() was always False by the time the download block
+    ran). Fixed by adding an `expected_size` parameter (threaded from
+    download_damip.py's file-listing size) so a short on-disk file can
+    actually be recognized as partial and resumed; see
+    test_fetch_resumes_partial_download_when_expected_size_known and
+    test_fetch_does_not_resume_when_existing_file_already_matches_expected_size.
+    Two narrower residual gaps that only apply when a caller supplies
+    neither checksum nor expected_size (or on a 416 for a fresh, non-Range
+    request) remain and are documented in the two tests still marked
+    "KNOWN ISSUE" below.
 """
 import hashlib
 import json
@@ -306,25 +308,19 @@ def test_list_files_checksum_and_checksum_type_empty_list_unwrapped_to_defaults(
     assert files[0]['checksum_type'] == 'sha256'
 
 
-def test_list_files_url_as_list_takes_first_element_only_KNOWN_ISSUE(monkeypatch):
-    """KNOWN ISSUE (pre-existing, not fixed here -- reported separately).
-
-    ESGF Solr's `url` field can itself be multi-valued: a list with one
-    pipe-string per access service (HTTPServer/OPENDAP/Globus/GridFTP),
-    order not guaranteed. list_files() only ever inspects url_str[0]
-    (line ~127: `url_str = url_str[0] if url_str else ''`) and never scans
-    the remaining list entries. If the HTTPServer entry isn't first, the
-    file is silently DROPPED from the result -- even though a perfectly
-    good HTTPServer download URL exists later in the same list.
-
-    This test pins the CURRENT (buggy) behavior so a future real fix shows
-    up as a deliberate, visible diff rather than a silent behavior change.
+def test_list_files_url_as_list_scans_all_entries_for_httpserver(monkeypatch):
+    """Regression test for a real bug found in WP-M4.6 and fixed immediately
+    after: ESGF Solr's `url` field can be multi-valued (a list with one
+    pipe-string per access service -- HTTPServer/OPENDAP/Globus/GridFTP --
+    order not guaranteed). list_files() used to only inspect url_str[0] and
+    silently DROP the file if HTTPServer wasn't first. It must now scan every
+    entry in the list.
     """
     docs = [{
-        'title': 'dropped.nc', 'size': 1,
+        'title': 'found.nc', 'size': 1,
         'url': [
-            'globus://x.example/dropped.nc|Globus|Globus',
-            'http://real.example/dropped.nc|HTTPServer|download',
+            'globus://x.example/found.nc|Globus|Globus',
+            'http://real.example/found.nc|HTTPServer|download',
         ],
     }]
 
@@ -333,9 +329,8 @@ def test_list_files_url_as_list_takes_first_element_only_KNOWN_ISSUE(monkeypatch
 
     monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
     files = esgf.list_files('ds1')
-    # Current (buggy) behavior: dropped, despite a valid HTTPServer URL
-    # existing at url[1].
-    assert files == []
+    assert len(files) == 1
+    assert files[0]['url'] == 'http://real.example/found.nc'
 
 
 # ---------------------------------------------------------------------------
@@ -604,18 +599,15 @@ def test_fetch_post_download_checksum_mismatch_raises(tmp_path, monkeypatch):
 
 def test_fetch_existing_file_no_checksum_accepted_without_verification_KNOWN_ISSUE(
         tmp_path, monkeypatch):
-    """KNOWN ISSUE (pre-existing, not fixed here -- reported separately).
+    """KNOWN ISSUE, narrowed by a later fix (see fetch()'s expected_size param
+    and test_fetch_resumes_partial_download_when_expected_size_known below).
 
-    When no checksum is supplied, fetch() unconditionally trusts ANY
-    pre-existing destination file as "complete" and returns True without
-    ever contacting the network -- even if the file is only a truncated
-    partial download left over from a previously interrupted run. This is
-    also why the documented HTTP-Range 'resume' feature never actually
-    resumes anything in this client: by the time the download block would
-    run, the file has already been accepted (this branch) or deleted
-    (checksum-mismatch branch, see the redownload test above), so
-    dest_path.exists() is always False when the Range header would be
-    attached.
+    When fetch() is called with NEITHER a checksum NOR expected_size, it has
+    no way to distinguish a truncated partial file from a genuinely complete
+    one, so it trusts any pre-existing destination file as-is and returns
+    True without contacting the network. download_damip.py's real call site
+    always passes expected_size now, so this residual gap only bites a
+    caller that supplies neither piece of information.
     """
     partial_content = b'only-part'
     dest = tmp_path / 'file.nc'
@@ -633,15 +625,16 @@ def test_fetch_existing_file_no_checksum_accepted_without_verification_KNOWN_ISS
 
 def test_fetch_http_416_without_checksum_reports_success_but_creates_no_file_KNOWN_ISSUE(
         tmp_path, monkeypatch):
-    """KNOWN ISSUE (pre-existing, not fixed here -- reported separately).
+    """KNOWN ISSUE (still present -- unrelated to the expected_size fix above).
 
     If urlopen() raises HTTPError(416) on the very first attempt (no
-    pre-existing destination file), fetch() takes the "Range not
-    satisfiable, file already complete on server" branch (a no-op `pass`)
-    and then -- since no checksum was requested to catch the discrepancy --
-    returns True immediately. The destination file is never created. The
-    caller is told the download "succeeded" even though nothing was ever
-    written to disk.
+    pre-existing destination file, so no Range header was even sent -- a real
+    ESGF server shouldn't do this, but nothing in fetch() guards against it),
+    fetch() takes the "Range not satisfiable, file already complete on
+    server" branch (a no-op `pass`) and then -- since no checksum was
+    requested to catch the discrepancy -- returns True immediately. The
+    destination file is never created. The caller is told the download
+    "succeeded" even though nothing was ever written to disk.
     """
     dest = tmp_path / 'never_created.nc'
 
@@ -652,3 +645,48 @@ def test_fetch_http_416_without_checksum_reports_success_but_creates_no_file_KNO
     ok = esgf.fetch('http://x/file.nc', str(dest), checksum=None)
     assert ok is True
     assert not dest.exists()
+
+
+def test_fetch_resumes_partial_download_when_expected_size_known(tmp_path, monkeypatch):
+    """Regression test for the expected_size fix: a short existing file, once
+    its true size is known, is recognized as partial and resumed via an HTTP
+    Range request (appended, not overwritten) instead of being silently
+    trusted or fully re-downloaded from scratch.
+    """
+    full_content = b'0123456789ABCDEF'  # 16 bytes
+    partial_content = full_content[:6]  # first 6 bytes already on disk
+    remaining = full_content[6:]
+
+    dest = tmp_path / 'file.nc'
+    dest.write_bytes(partial_content)
+
+    captured_range = {}
+
+    def fake_urlopen(req, timeout=60):
+        captured_range['Range'] = req.get_header('Range')
+        return _FakeHTTPResponse(remaining)
+
+    monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
+    ok = esgf.fetch('http://x/file.nc', str(dest), expected_size=len(full_content))
+
+    assert ok is True
+    assert captured_range['Range'] == 'bytes=6-'
+    assert dest.read_bytes() == full_content  # appended, not overwritten
+
+
+def test_fetch_does_not_resume_when_existing_file_already_matches_expected_size(
+        tmp_path, monkeypatch):
+    """A file whose on-disk size already equals expected_size is NOT partial
+    -- it falls through to the checksum (or no-checksum-trust) path, not the
+    Range-resume path."""
+    full_content = b'complete-file-bytes'
+    dest = tmp_path / 'file.nc'
+    dest.write_bytes(full_content)
+
+    def fake_urlopen(req, timeout=60):
+        raise AssertionError('should not re-download a file matching expected_size')
+
+    monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
+    ok = esgf.fetch('http://x/file.nc', str(dest), expected_size=len(full_content))
+    assert ok is True
+    assert dest.read_bytes() == full_content

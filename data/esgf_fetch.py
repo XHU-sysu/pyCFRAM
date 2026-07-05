@@ -120,28 +120,36 @@ def list_files(
             data = json.loads(response.read())
             files = []
             for doc in data.get('response', {}).get('docs', []):
-                # url field is pipe-separated: "http://...|HTTPServer|...|..."
-                # Extract HTTPServer URL
-                url_str = doc.get('url', '')
-                if isinstance(url_str, list):
-                    url_str = url_str[0] if url_str else ''
+                # url is a multi-valued Solr field: one pipe-separated
+                # "url|mimetype|service" string per access service (HTTPServer,
+                # OPENDAP, GridFTP, ...), in no guaranteed order. Search every
+                # entry for the HTTPServer one instead of assuming entry[0] is
+                # it -- a single-entry list happened to have HTTPServer first
+                # in early testing, but that's not a documented guarantee.
+                url_field = doc.get('url', '')
+                url_entries = url_field if isinstance(url_field, list) else [url_field]
 
-                # Parse pipe-separated format
-                parts = url_str.split('|')
                 http_url = None
-                for i, part in enumerate(parts):
-                    if i > 0 and parts[i - 1] == 'HTTPServer' and part.startswith('http'):
-                        http_url = part
-                        break
-                    elif part.startswith('http') and i + 1 < len(parts) and parts[i + 1] == 'HTTPServer':
-                        http_url = part
+                for url_str in url_entries:
+                    parts = url_str.split('|')
+                    for i, part in enumerate(parts):
+                        if i > 0 and parts[i - 1] == 'HTTPServer' and part.startswith('http'):
+                            http_url = part
+                            break
+                        elif part.startswith('http') and i + 1 < len(parts) and parts[i + 1] == 'HTTPServer':
+                            http_url = part
+                            break
+                    if http_url:
                         break
 
-                # Fallback: just take first URL that looks like http
+                # Fallback: just take first URL that looks like http, from any entry
                 if not http_url:
-                    for part in parts:
-                        if part.startswith('http'):
-                            http_url = part
+                    for url_str in url_entries:
+                        for part in url_str.split('|'):
+                            if part.startswith('http'):
+                                http_url = part
+                                break
+                        if http_url:
                             break
 
                 if http_url:
@@ -215,6 +223,7 @@ def fetch(
     checksum_type: str = 'sha256',
     resume: bool = True,
     manifest_path: Optional[str] = None,
+    expected_size: Optional[int] = None,
 ) -> bool:
     """Download a single file from ESGF with resume and checksum support.
 
@@ -226,6 +235,15 @@ def fetch(
         resume: support HTTP 206 range request if file partially exists
         manifest_path: optional path to JSON manifest (unused in this function,
                        passed for API compatibility)
+        expected_size: full file size in bytes, if known (from the ESGF file
+                       listing). Without this, an existing on-disk file of any
+                       size looks "complete" (checksum, if provided, is the
+                       only thing distinguishing a partial download from a
+                       finished one -- and a partial file always fails
+                       checksum, so it'd be deleted and redownloaded from
+                       scratch rather than resumed). With it, a short existing
+                       file is recognized as partial and resumed via Range
+                       instead.
 
     Returns:
         True if successful (and checksum OK if provided)
@@ -233,30 +251,37 @@ def fetch(
     dest_path = Path(dest)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Check if file already exists and is complete
+    is_partial = False
     if dest_path.exists():
-        if checksum:
+        current_size = dest_path.stat().st_size
+        if expected_size and current_size < expected_size:
+            # Short file -- a prior download was interrupted. Don't checksum
+            # (it can't match yet) or delete; resume it below.
+            is_partial = True
+        elif checksum:
             actual = compute_checksum(dest, checksum_type)
             if actual == checksum:
                 return True
             else:
-                # Checksum mismatch, redownload
+                # Complete-length-but-wrong-content (or no expected_size to
+                # tell it apart from partial) -- can't resume a corrupt file,
+                # start over.
                 dest_path.unlink()
         else:
-            # No checksum provided; assume existing file is OK
+            # No checksum and no evidence of a short file; assume OK.
             return True
 
-    # Download with resume support
+    # Download (resuming a short existing file via Range if applicable)
     req = urllib.request.Request(url)
 
-    if resume and dest_path.exists():
+    if resume and is_partial:
         # Request range starting from current file size
         current_size = dest_path.stat().st_size
         req.add_header('Range', f'bytes={current_size}-')
 
     try:
         with urllib.request.urlopen(req, timeout=60) as response:
-            mode = 'ab' if (resume and dest_path.exists()) else 'wb'
+            mode = 'ab' if (resume and is_partial) else 'wb'
             with open(dest, mode) as f:
                 while True:
                     chunk = response.read(8192)

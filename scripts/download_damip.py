@@ -247,7 +247,8 @@ def download_files(model: str, experiment: str, files: List[dict],
         try:
             if verbose:
                 print(f"[{i}/{len(files)}] {title}...")
-            fetch(url, str(dest), checksum=checksum, checksum_type=checksum_type)
+            fetch(url, str(dest), checksum=checksum, checksum_type=checksum_type,
+                  expected_size=f.get('size', 0))
             manifest_entry = {
                 'title': title,
                 'url': url,
