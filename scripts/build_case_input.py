@@ -12,17 +12,43 @@ Usage:
     python scripts/build_case_input.py --case eh22 --dry-run
 """
 
-import os, sys, argparse
+import os, sys, argparse, importlib
 import numpy as np
 from netCDF4 import Dataset
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.config import load_case
 
+# Registry: source.type -> module that registers it via @register_source
+# (data/source_base.py). Importing the module triggers the decorator, which
+# is all get_source() needs. Extend this dict when adding a new registered
+# DataSource plugin (e.g. a new data/<x>_source.py). If a type is missing
+# here, we simply skip the dynamic import (its module may already have been
+# imported elsewhere) and let get_source() raise its own clear
+# "Unknown source type" error — this stays a small explicit map, not a
+# generic plugin-discovery mechanism (docs/plan_ph3.md §2.3-1).
+SOURCE_MODULES = {
+    'era5_daily': 'data.era5_source',
+    'era5_date_range': 'data.era5_source',
+    'era5_merra2': 'data.era5_source',
+    'cmip6_damip': 'data.cmip6_damip_source',
+}
+
 # Variable classification: which go into pres vs surf files
 PRES_3D_VARS = ['ta_lay', 'q', 'o3', 'camt', 'cliq', 'cice', 'co2',
                 'bc', 'ocphi', 'ocpho', 'sulf', 'ss', 'dust']
 SURF_2D_VARS = ['ts', 'ps', 'solar', 'albedo']
+
+# Optional surface variables: written to *_surf.nc only when the source's
+# state dict actually provides them (state[varname] is not None). NEVER
+# fabricate a default/zero value here for a variable a source doesn't
+# produce -- e.g. writing huss=0 for ERA5 (which has no huss) would silently
+# change ERA5/Fu-engine behavior, since the runner's HOLD-fallback logic
+# treats "variable absent" differently from "variable present but ~0"
+# (docs/plan_ph3.md §2.3-2). Contrast with SURF_2D_VARS above, whose missing
+# case fills zeros with a warning -- that fallback predates this module's
+# optional-variable support and is left as-is for those four required vars.
+OPTIONAL_SURF_2D_VARS = ['huss']
 
 # Units metadata
 VAR_UNITS = {
@@ -32,6 +58,7 @@ VAR_UNITS = {
     'bc': 'kg/kg', 'ocphi': 'kg/kg', 'ocpho': 'kg/kg',
     'sulf': 'kg/kg', 'ss': 'kg/kg', 'dust': 'kg/kg',
     'ts': 'K', 'ps': 'Pa', 'solar': 'W/m2', 'albedo': '1',
+    'huss': 'kg/kg',
 }
 
 VAR_LONG_NAMES = {
@@ -52,6 +79,7 @@ VAR_LONG_NAMES = {
     'ps': 'Surface pressure',
     'solar': 'TOA incident solar radiation',
     'albedo': 'Surface albedo',
+    'huss': 'Near-surface (2m) specific humidity',
 }
 
 AEROSOL_VARS = ['bc', 'ocphi', 'ocpho', 'sulf', 'ss', 'dust']
@@ -160,6 +188,18 @@ def write_surf_nc(filepath, state):
         v.units = VAR_UNITS.get(varname, '')
         v.long_name = VAR_LONG_NAMES.get(varname, varname)
 
+    # Optional variables: write only if the source actually supplied them.
+    # No zero-fill fallback here -- see OPTIONAL_SURF_2D_VARS docstring above.
+    for varname in OPTIONAL_SURF_2D_VARS:
+        data = state.get(varname)
+        if data is None:
+            continue
+        v = nc.createVariable(varname, 'f8', ('time', 'lat', 'lon'),
+                              zlib=True, complevel=4)
+        v[0, :, :] = data
+        v.units = VAR_UNITS.get(varname, '')
+        v.long_name = VAR_LONG_NAMES.get(varname, varname)
+
     nc.close()
     fsize = os.path.getsize(filepath) / 1e6
     print(f"  Wrote {filepath} ({fsize:.1f} MB)")
@@ -233,10 +273,21 @@ def main():
         sys.exit(1)
 
     print(f"=== Building CFRAM input for case: {args.case} ===")
-    print(f"Source type: {cfg['source']['type']}")
+    src_type = cfg['source']['type']
+    print(f"Source type: {src_type}")
 
-    # Import data sources (triggers registration)
-    import data.era5_source  # noqa: F401
+    # Registry-driven import: trigger the @register_source decorator for
+    # whichever plugin module owns this source.type (see SOURCE_MODULES
+    # above). If src_type isn't in the registry, we don't hard-fail here --
+    # its module may already be imported by something else -- and let
+    # get_source() below raise its own descriptive "Unknown source type"
+    # error if it truly never got registered.
+    module_name = SOURCE_MODULES.get(src_type)
+    if module_name:
+        importlib.import_module(module_name)
+    else:
+        print(f"  Note: no SOURCE_MODULES entry for '{src_type}'; "
+              f"assuming its module is already imported/registered.")
 
     from data.source_base import get_source
     source = get_source(cfg)
