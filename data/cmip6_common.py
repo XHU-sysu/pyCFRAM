@@ -377,6 +377,70 @@ def normalize_grid(lat, lon, data=None):
     return lat_out, lon_out, data_out
 
 
+def regrid_horizontal_bilinear(lat_src, lon_src, field_src, lat_tgt, lon_tgt):
+    """Bilinear regrid of a (..., nlat_src, nlon_src) field to (nlat_tgt,
+    nlon_tgt), periodic in longitude.
+
+    Some models publish a variable on a coarser native horizontal grid than
+    the model's other Amon variables (confirmed against real downloaded
+    data: MRI-ESM2-0's `o3` is on a 64x128 grid while ta/hus/ts/ps/cl are all
+    on 160x320) -- CMIP6 has no requirement that every variable in a
+    table_id share one grid. Any field whose own (lat, lon) doesn't match
+    the case's reference grid (established from `ta`) must be regridded
+    onto it before combining with other fields; otherwise a "shape
+    mismatch" IndexError (or a wrong, unaligned broadcast if shapes happen
+    to be compatible) awaits downstream in fill_subsurface/state assembly.
+
+    Same bilinear-periodic-in-longitude approach as
+    core/kernels.py's `_bilinear_regrid_2d` (independently implemented here,
+    not imported -- data/ and core/ are separate layers and core/ must stay
+    untouched per Phase 3's zero-core-changes acceptance criterion). Handles
+    an arbitrary number of leading dimensions (e.g. (nlev, nlat, nlon)) by
+    looping the 2D interpolation over them.
+
+    Parameters
+    ----------
+    lat_src, lon_src : 1D arrays (degrees) -- field_src's native grid.
+    field_src : (..., nlat_src, nlon_src) ndarray.
+    lat_tgt, lon_tgt : 1D arrays (degrees) -- the reference grid to regrid onto.
+
+    Returns
+    -------
+    (..., nlat_tgt, nlon_tgt) ndarray.
+    """
+    from scipy.interpolate import RegularGridInterpolator
+
+    lat_src = np.asarray(lat_src, dtype=np.float64)
+    lon_src = np.asarray(lon_src, dtype=np.float64)
+    lat_tgt = np.asarray(lat_tgt, dtype=np.float64)
+    lon_tgt = np.asarray(lon_tgt, dtype=np.float64)
+    field_src = np.asarray(field_src, dtype=np.float64)
+
+    if lat_src[0] > lat_src[-1]:
+        lat_src = lat_src[::-1]
+        field_src = field_src[..., ::-1, :]
+
+    dlon = lon_src[1] - lon_src[0]
+    lon_pad = np.concatenate(([lon_src[0] - dlon], lon_src, [lon_src[-1] + dlon]))
+    lat_clip = np.clip(lat_tgt, lat_src.min(), lat_src.max())
+    lon_wrapped = np.mod(lon_tgt - lon_src[0], 360.0) + lon_src[0]
+    LA, LO = np.meshgrid(lat_clip, lon_wrapped, indexing='ij')
+    pts = np.stack([LA.ravel(), LO.ravel()], axis=-1)
+
+    leading_shape = field_src.shape[:-2]
+    field_flat = field_src.reshape(-1, field_src.shape[-2], field_src.shape[-1])
+    out_flat = np.empty((field_flat.shape[0], lat_tgt.size, lon_tgt.size))
+    for i in range(field_flat.shape[0]):
+        data_pad = np.concatenate(
+            [field_flat[i, :, -1:], field_flat[i], field_flat[i, :, :1]], axis=1)
+        interp = RegularGridInterpolator(
+            (lat_src, lon_pad), data_pad, method='linear',
+            bounds_error=False, fill_value=None)
+        out_flat[i] = interp(pts).reshape(lat_tgt.size, lon_tgt.size)
+
+    return out_flat.reshape(leading_shape + (lat_tgt.size, lon_tgt.size))
+
+
 # ---------------------------------------------------------------------------
 # Analytic (rsdt-free) TOA insolation fallback.
 # ---------------------------------------------------------------------------

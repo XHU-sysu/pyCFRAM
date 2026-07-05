@@ -300,6 +300,71 @@ def test_normalize_grid_no_data_arg():
 
 
 # ---------------------------------------------------------------------------
+# 4b. regrid_horizontal_bilinear — cross-model horizontal grid mismatch
+# (real bug: MRI-ESM2-0's o3 is published on a 64x128 grid while every
+# other Amon variable in the same model is 160x320)
+# ---------------------------------------------------------------------------
+
+def test_regrid_horizontal_bilinear_identity_when_grids_match():
+    """Regridding onto the exact same grid must reproduce the input closely
+    (bilinear identity, modulo tiny floating-point interpolation noise)."""
+    lat_src = np.linspace(-90, 90, 8)
+    lon_src = np.linspace(0, 360, 16, endpoint=False)
+    LA, LO = np.meshgrid(lat_src, lon_src, indexing='ij')
+    field = np.sin(np.radians(LA)) * np.cos(np.radians(LO))
+    out = common.regrid_horizontal_bilinear(lat_src, lon_src, field, lat_src, lon_src)
+    np.testing.assert_allclose(out, field, atol=1e-8)
+
+
+def test_regrid_horizontal_bilinear_coarse_to_fine_shape_and_range():
+    """Coarse (64x128-like) -> fine (160x320-like) grid: output shape must
+    match the target, and values must stay within the source field's range
+    (bilinear doesn't overshoot for a smooth field)."""
+    lat_src = np.linspace(-90, 90, 8)
+    lon_src = np.linspace(0, 360, 16, endpoint=False)
+    LA, LO = np.meshgrid(lat_src, lon_src, indexing='ij')
+    field = 10.0 + 5.0 * np.sin(np.radians(LA))  # smooth, no lon dependence for a simple bound check
+
+    lat_tgt = np.linspace(-90, 90, 20)
+    lon_tgt = np.linspace(0, 360, 40, endpoint=False)
+    out = common.regrid_horizontal_bilinear(lat_src, lon_src, field, lat_tgt, lon_tgt)
+
+    assert out.shape == (20, 40)
+    assert out.min() >= field.min() - 1e-6
+    assert out.max() <= field.max() + 1e-6
+
+
+def test_regrid_horizontal_bilinear_handles_leading_level_dimension():
+    """A (nlev, nlat, nlon) field regrids level-by-level, preserving nlev."""
+    lat_src = np.linspace(-90, 90, 8)
+    lon_src = np.linspace(0, 360, 16, endpoint=False)
+    field = np.random.RandomState(0).rand(5, 8, 16)  # (nlev=5, nlat, nlon)
+
+    lat_tgt = np.linspace(-90, 90, 20)
+    lon_tgt = np.linspace(0, 360, 40, endpoint=False)
+    out = common.regrid_horizontal_bilinear(lat_src, lon_src, field, lat_tgt, lon_tgt)
+    assert out.shape == (5, 20, 40)
+    assert np.all(np.isfinite(out))
+
+
+def test_regrid_horizontal_bilinear_longitude_periodic_wrap():
+    """A field with a feature straddling the lon=0/360 seam must interpolate
+    smoothly across it (periodic padding), not show a discontinuity."""
+    lat_src = np.linspace(-90, 90, 8)
+    lon_src = np.linspace(0, 360, 16, endpoint=False)
+    LA, LO = np.meshgrid(lat_src, lon_src, indexing='ij')
+    field = np.cos(np.radians(LO))  # smooth periodic function of lon only
+
+    # Target point right at the seam (lon=359) should be close to cos(359deg),
+    # not jump to some unrelated value from bad edge handling.
+    lat_tgt = np.array([0.0])
+    lon_tgt = np.array([359.0])
+    out = common.regrid_horizontal_bilinear(lat_src, lon_src, field, lat_tgt, lon_tgt)
+    expected = np.cos(np.radians(359.0))
+    assert abs(out[0, 0] - expected) < 0.05
+
+
+# ---------------------------------------------------------------------------
 # 5. analytic_solar — two anchors
 # ---------------------------------------------------------------------------
 

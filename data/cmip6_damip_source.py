@@ -601,7 +601,18 @@ class CMIP6DamipSource(DataSource):
                 raise FileNotFoundError(
                     "cmip6_damip: o3='use_model' requested but %s/%s/%s has no o3 data"
                     % (model, experiment, variant))
-            climo_o3_b, climo_o3_w, _, _, plev_o3 = _climo_pair_for_variable(files['o3'], 'o3', base_years, warm_years)
+            climo_o3_b, climo_o3_w, lat_o3, lon_o3, plev_o3 = _climo_pair_for_variable(
+                files['o3'], 'o3', base_years, warm_years)
+            # Some models publish o3 on a coarser native horizontal grid than
+            # the model's other Amon variables (confirmed: MRI-ESM2-0's o3 is
+            # 64x128 while ta/hus/ts/ps/cl are all 160x320 -- CMIP6 has no
+            # requirement that every variable in a table_id share one grid).
+            # Regrid onto the reference (ta) grid before anything downstream
+            # assumes every field shares one lat/lon.
+            if lat_o3.shape != lat.shape or lon_o3.shape != lon.shape or \
+                    not np.array_equal(lat_o3, lat) or not np.array_equal(lon_o3, lon):
+                climo_o3_b = common.regrid_horizontal_bilinear(lat_o3, lon_o3, climo_o3_b, lat, lon)
+                climo_o3_w = common.regrid_horizontal_bilinear(lat_o3, lon_o3, climo_o3_w, lat, lon)
             plev_o3_use = plev_o3 if plev_o3 is not None else plev_ta
             o3_b_mmr = _maybe_interp(climo_o3_b, plev_o3_use, target_plev_pa_sfc2toa) * common.VMR_TO_MMR
             o3_w_mmr = _maybe_interp(climo_o3_w, plev_o3_use, target_plev_pa_sfc2toa) * common.VMR_TO_MMR
