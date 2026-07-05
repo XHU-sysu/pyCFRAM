@@ -145,12 +145,23 @@ def list_files(
                             break
 
                 if http_url:
+                    # checksum/checksum_type are Solr multi-valued fields
+                    # (returned as lists, e.g. checksum_type=['SHA256']) --
+                    # unwrap to a scalar. Files can carry more than one
+                    # checksum type; take the first.
+                    checksum = doc.get('checksum', '')
+                    if isinstance(checksum, list):
+                        checksum = checksum[0] if checksum else ''
+                    checksum_type = doc.get('checksum_type', 'sha256')
+                    if isinstance(checksum_type, list):
+                        checksum_type = checksum_type[0] if checksum_type else 'sha256'
+
                     files.append({
                         'title': doc.get('title', ''),
                         'size': doc.get('size', 0),
                         'url': http_url,
-                        'checksum': doc.get('checksum', ''),
-                        'checksum_type': doc.get('checksum_type', 'sha256'),
+                        'checksum': checksum,
+                        'checksum_type': checksum_type,
                     })
             return files
     except urllib.error.URLError as e:
