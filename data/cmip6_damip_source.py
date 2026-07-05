@@ -292,17 +292,39 @@ def _maybe_interp(field, plev_src_pa, plev_target_pa):
     return common.interp_plev_to_target(field, plev_src_pa, plev_target_pa)
 
 
-def _read_hybrid_coeffs(nc, vinfo):
+def _read_hybrid_coeffs(nc, vinfo, nlev_data=None):
     """Read + normalize hybrid-sigma-pressure coefficients per the naming
-    convention `vinfo['scheme']` (from `common.detect_vertical`)."""
+    convention `vinfo['scheme']` (from `common.detect_vertical`).
+
+    Some models (confirmed against real downloaded data: IPSL-CM6A-LR)
+    publish their ap/b (or a/b) coefficients at layer INTERFACES
+    (nlev_data+1 values, on a dim like `klevp1`) rather than at layer
+    MIDPOINTS (nlev_data values, matching the field data's actual level
+    dimension, e.g. `presnivs`). `hybrid_to_plev_mass_conserving` (moved
+    as-is from cesm2_cmip6_source.py, docs/plan_ph3.md §4 -- not rewritten,
+    since it's already validated bit-exact against real CESM2 data) requires
+    a/b the same length as the field. When `nlev_data` is given and the raw
+    coefficient array is exactly one longer, adjacent interface pairs are
+    averaged down to midpoint values -- exact, not an approximation: since
+    layer pressure p = ap*p0 + b*ps is linear in ap/b for fixed p0/ps,
+    averaging interface ap (or a) and b pairwise gives exactly the average
+    of the two interface pressures, which is the standard definition of a
+    layer's midpoint pressure.
+    """
+    def _to_midlayer(raw):
+        raw = np.asarray(raw, dtype=np.float64)
+        if nlev_data is not None and raw.shape[0] == nlev_data + 1:
+            return 0.5 * (raw[:-1] + raw[1:])
+        return raw
+
     if vinfo['scheme'] == 'hybrid_ab_p0':
-        a_raw = np.array(nc.variables[vinfo['a']][:], dtype=np.float64)
-        b_raw = np.array(nc.variables[vinfo['b']][:], dtype=np.float64)
+        a_raw = _to_midlayer(nc.variables[vinfo['a']][:])
+        b_raw = _to_midlayer(nc.variables[vinfo['b']][:])
         p0_raw = float(np.asarray(nc.variables[vinfo['p0']][:]).reshape(-1)[0])
         return common.normalize_hybrid_coeffs('hybrid_ab_p0', a=a_raw, b=b_raw, p0=p0_raw)
     if vinfo['scheme'] == 'hybrid_ap_b':
-        ap_raw = np.array(nc.variables[vinfo['ap']][:], dtype=np.float64)
-        b_raw = np.array(nc.variables[vinfo['b']][:], dtype=np.float64)
+        ap_raw = _to_midlayer(nc.variables[vinfo['ap']][:])
+        b_raw = _to_midlayer(nc.variables[vinfo['b']][:])
         return common.normalize_hybrid_coeffs('hybrid_ap_b', ap=ap_raw, b=b_raw)
     raise ValueError('cmip6_damip: unrecognized hybrid scheme %r' % vinfo['scheme'])
 
@@ -501,7 +523,7 @@ class CMIP6DamipSource(DataSource):
 
                 if is_hybrid:
                     vinfo = common.detect_vertical(formula_terms=formula_terms, override=override)
-                    a_eff, b_eff, p0_eff = _read_hybrid_coeffs(nc0, vinfo)
+                    a_eff, b_eff, p0_eff = _read_hybrid_coeffs(nc0, vinfo, nlev_data=cl_b_frac.shape[0])
 
                     def _to_target(field_frac, ps_2d_pa):
                         # hybrid_to_plev_mass_conserving wants TOA->sfc

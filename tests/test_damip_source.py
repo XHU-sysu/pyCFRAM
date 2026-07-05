@@ -426,3 +426,74 @@ def test_read_hybrid_coeffs_ab_p0_convention(tmp_path):
                                                      target_toa2sfc_pa)
         assert out.shape == (2, 1, 1)
         assert np.all(np.isfinite(out))
+
+
+def test_read_hybrid_coeffs_ap_b_interface_convention_averaged_to_midlayer(tmp_path):
+    """Regression test for a real bug hit against actual downloaded
+    IPSL-CM6A-LR hist-aer data (WP-M4.5): IPSL's ap/b are published on a
+    dim (`klevp1`, "levels + 1") one longer than the field's own level
+    dimension (`presnivs`) -- interface/boundary pressures, not midpoint
+    pressures. Feeding them straight into hybrid_to_plev_mass_conserving
+    (which requires a/b the same length as the field) crashed with
+    IndexError. _read_hybrid_coeffs must detect the +1 length and average
+    adjacent interface pairs down to nlev_data midpoint values.
+    """
+    path = str(tmp_path / 'cl_hybrid_ap_b_interface.nc')
+    with Dataset(path, 'w') as nc:
+        nc.createDimension('presnivs', 3)
+        nc.createDimension('klevp1', 4)
+        nc.createVariable('presnivs', 'f8', ('presnivs',))[:] = [1, 2, 3]
+        # Interface coefficients (4 boundaries framing 3 layers), matching
+        # IPSL's real ap/b dim (klevp1) and values roughly in its range.
+        ap_iface = [0.0, 2000.0, 6000.0, 10000.0]
+        b_iface = [1.0, 0.6, 0.2, 0.0]
+        nc.createVariable('ap', 'f8', ('klevp1',))[:] = ap_iface
+        nc.createVariable('b', 'f8', ('klevp1',))[:] = b_iface
+        cl = nc.createVariable('cl', 'f8', ('presnivs',))
+        cl[:] = [1.0, 20.0, 40.0]
+
+    with Dataset(path) as nc:
+        from data import cmip6_common as common
+        vinfo = {'scheme': 'hybrid_ap_b', 'ap': 'ap', 'b': 'b'}  # explicit override, no formula_terms
+        nlev_data = nc.variables['cl'].shape[0]
+        assert nlev_data == 3
+        a_eff, b_eff, p0_eff = damip._read_hybrid_coeffs(nc, vinfo, nlev_data=nlev_data)
+
+        # Exact pairwise average of the 4 interface values -> 3 midlayer values.
+        np.testing.assert_array_almost_equal(a_eff, [1000.0, 4000.0, 8000.0])
+        np.testing.assert_array_almost_equal(b_eff, [0.8, 0.4, 0.1])
+        assert p0_eff == 1.0  # hybrid_ap_b convention: p = ap*1 + b*ps
+
+        # Feed into hybrid_to_plev_mass_conserving -- must NOT raise IndexError
+        # (this is the exact call sequence that crashed against real IPSL data).
+        ps_2d = np.array([[101300.0]])
+        field_hyb = np.array([1.0, 20.0, 40.0]).reshape(3, 1, 1)
+        target_toa2sfc_pa = np.array([50000.0, 101300.0])
+        out = common.hybrid_to_plev_mass_conserving(field_hyb, a_eff, b_eff, p0_eff, ps_2d,
+                                                     target_toa2sfc_pa)
+        assert out.shape == (2, 1, 1)
+        assert np.all(np.isfinite(out))
+
+
+def test_read_hybrid_coeffs_ab_p0_matching_length_not_averaged(tmp_path):
+    """When the raw coefficient array already matches nlev_data (CESM2's
+    real case: hyam/hybm are mid-layer, same length as the field), passing
+    nlev_data must NOT trigger interface-averaging -- values pass through
+    unchanged. This guards the CESM2 regression gold: WP-M4.1's bit-exact
+    md5 match against real CESM2 raw data must not be perturbed by this fix.
+    """
+    path = str(tmp_path / 'cl_hybrid_ab_p0_matching.nc')
+    with Dataset(path, 'w') as nc:
+        nc.createDimension('lev', 3)
+        nc.createVariable('lev', 'f8', ('lev',))[:] = [1, 2, 3]
+        p0v = nc.createVariable('p0', 'f8', ())
+        p0v[...] = 100000.0
+        nc.createVariable('a', 'f8', ('lev',))[:] = [0.01, 0.02, 0.0]
+        nc.createVariable('b', 'f8', ('lev',))[:] = [0.0, 0.3, 0.98]
+        nc.createVariable('cl', 'f8', ('lev',))[:] = [1.0, 20.0, 40.0]
+
+    with Dataset(path) as nc:
+        vinfo = {'scheme': 'hybrid_ab_p0', 'a': 'a', 'b': 'b', 'p0': 'p0'}
+        a_eff, b_eff, p0_eff = damip._read_hybrid_coeffs(nc, vinfo, nlev_data=3)
+        np.testing.assert_array_equal(a_eff, [0.01, 0.02, 0.0])
+        np.testing.assert_array_equal(b_eff, [0.0, 0.3, 0.98])
