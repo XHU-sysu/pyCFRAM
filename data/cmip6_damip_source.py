@@ -310,6 +310,22 @@ def _read_hybrid_coeffs(nc, vinfo, nlev_data=None):
     averaging interface ap (or a) and b pairwise gives exactly the average
     of the two interface pressures, which is the standard definition of a
     layer's midpoint pressure.
+
+    Returns
+    -------
+    (a_eff, b_eff, p0_eff, flipped) -- `hybrid_to_plev_mass_conserving`
+    requires TOA->sfc order (b ascending from ~0 at TOA to ~1 at surface).
+    CESM2's native hyam/hybm are already stored this way (the function's
+    original, only-tested convention), but other models (confirmed:
+    IPSL-CM6A-LR) store levels surface->TOA instead (b descending from ~1 to
+    ~0). Direction is detected from b and the coefficient arrays are
+    reversed if needed; `flipped` tells the caller to reverse the field data
+    (cl/clw/cli) the same way before calling that function -- reversing only
+    one side silently scrambles the profile (this crashed with IndexError in
+    an earlier attempt at this fix for a different reason, then produced a
+    plausible-looking but physically wrong near-zero cloud field once that
+    was fixed, until this order mismatch was found by sanity-checking
+    against the real raw data's actual cloud fraction magnitude).
     """
     def _to_midlayer(raw):
         raw = np.asarray(raw, dtype=np.float64)
@@ -321,12 +337,19 @@ def _read_hybrid_coeffs(nc, vinfo, nlev_data=None):
         a_raw = _to_midlayer(nc.variables[vinfo['a']][:])
         b_raw = _to_midlayer(nc.variables[vinfo['b']][:])
         p0_raw = float(np.asarray(nc.variables[vinfo['p0']][:]).reshape(-1)[0])
-        return common.normalize_hybrid_coeffs('hybrid_ab_p0', a=a_raw, b=b_raw, p0=p0_raw)
-    if vinfo['scheme'] == 'hybrid_ap_b':
+        a_eff, b_eff, p0_eff = common.normalize_hybrid_coeffs('hybrid_ab_p0', a=a_raw, b=b_raw, p0=p0_raw)
+    elif vinfo['scheme'] == 'hybrid_ap_b':
         ap_raw = _to_midlayer(nc.variables[vinfo['ap']][:])
         b_raw = _to_midlayer(nc.variables[vinfo['b']][:])
-        return common.normalize_hybrid_coeffs('hybrid_ap_b', ap=ap_raw, b=b_raw)
-    raise ValueError('cmip6_damip: unrecognized hybrid scheme %r' % vinfo['scheme'])
+        a_eff, b_eff, p0_eff = common.normalize_hybrid_coeffs('hybrid_ap_b', ap=ap_raw, b=b_raw)
+    else:
+        raise ValueError('cmip6_damip: unrecognized hybrid scheme %r' % vinfo['scheme'])
+
+    flipped = bool(b_eff[0] > b_eff[-1])
+    if flipped:
+        a_eff = a_eff[::-1].copy()
+        b_eff = b_eff[::-1].copy()
+    return a_eff, b_eff, p0_eff, flipped
 
 
 @register_source('cmip6_damip')
@@ -523,14 +546,20 @@ class CMIP6DamipSource(DataSource):
 
                 if is_hybrid:
                     vinfo = common.detect_vertical(formula_terms=formula_terms, override=override)
-                    a_eff, b_eff, p0_eff = _read_hybrid_coeffs(nc0, vinfo, nlev_data=cl_b_frac.shape[0])
+                    a_eff, b_eff, p0_eff, coeffs_flipped = _read_hybrid_coeffs(
+                        nc0, vinfo, nlev_data=cl_b_frac.shape[0])
 
                     def _to_target(field_frac, ps_2d_pa):
-                        # hybrid_to_plev_mass_conserving wants TOA->sfc
-                        # ascending target plev; flip result back to
-                        # sfc->TOA to match target_lev_hpa ordering.
+                        # hybrid_to_plev_mass_conserving wants TOA->sfc order
+                        # for both the field and a_eff/b_eff. _read_hybrid_coeffs
+                        # already normalized the coefficients to that order and
+                        # reports whether a reversal was needed -- the field
+                        # (native file order, matching the coefficients' native
+                        # order) must be reversed the same way, or the profile
+                        # is silently scrambled (see _read_hybrid_coeffs docstring).
+                        field_toa2sfc = field_frac[::-1] if coeffs_flipped else field_frac
                         proj_toa2sfc = common.hybrid_to_plev_mass_conserving(
-                            field_frac, a_eff, b_eff, p0_eff, ps_2d_pa, target_plev_pa_toa2sfc)
+                            field_toa2sfc, a_eff, b_eff, p0_eff, ps_2d_pa, target_plev_pa_toa2sfc)
                         return proj_toa2sfc[::-1]
 
                     base_state['camt'] = np.clip(_to_target(cl_b_frac, climo_ps_b), 0.0, 1.0)

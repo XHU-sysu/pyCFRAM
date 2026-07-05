@@ -412,7 +412,9 @@ def test_read_hybrid_coeffs_ab_p0_convention(tmp_path):
         from data import cmip6_common as common
         vinfo = common.detect_vertical(formula_terms=formula_terms)
         assert vinfo['scheme'] == 'hybrid_ab_p0'
-        a_eff, b_eff, p0_eff = damip._read_hybrid_coeffs(nc, vinfo)
+        a_eff, b_eff, p0_eff, flipped = damip._read_hybrid_coeffs(nc, vinfo)
+        # b ascends 0.0->0.98 (TOA->sfc already, CESM2's native convention) -> no flip.
+        assert flipped is False
         np.testing.assert_array_equal(a_eff, [0.01, 0.02, 0.0])
         np.testing.assert_array_equal(b_eff, [0.0, 0.3, 0.98])
         assert p0_eff == 100000.0
@@ -443,10 +445,12 @@ def test_read_hybrid_coeffs_ap_b_interface_convention_averaged_to_midlayer(tmp_p
         nc.createDimension('presnivs', 3)
         nc.createDimension('klevp1', 4)
         nc.createVariable('presnivs', 'f8', ('presnivs',))[:] = [1, 2, 3]
-        # Interface coefficients (4 boundaries framing 3 layers), matching
-        # IPSL's real ap/b dim (klevp1) and values roughly in its range.
-        ap_iface = [0.0, 2000.0, 6000.0, 10000.0]
-        b_iface = [1.0, 0.6, 0.2, 0.0]
+        # Interface coefficients (4 boundaries framing 3 layers), TOA->sfc
+        # order (b ascending 0->1) so this test isolates interface-averaging
+        # from the separate order-flip behavior (see the dedicated flip test
+        # below, which uses IPSL's real sfc->TOA direction).
+        ap_iface = [10000.0, 6000.0, 2000.0, 0.0]
+        b_iface = [0.0, 0.2, 0.6, 1.0]
         nc.createVariable('ap', 'f8', ('klevp1',))[:] = ap_iface
         nc.createVariable('b', 'f8', ('klevp1',))[:] = b_iface
         cl = nc.createVariable('cl', 'f8', ('presnivs',))
@@ -457,11 +461,13 @@ def test_read_hybrid_coeffs_ap_b_interface_convention_averaged_to_midlayer(tmp_p
         vinfo = {'scheme': 'hybrid_ap_b', 'ap': 'ap', 'b': 'b'}  # explicit override, no formula_terms
         nlev_data = nc.variables['cl'].shape[0]
         assert nlev_data == 3
-        a_eff, b_eff, p0_eff = damip._read_hybrid_coeffs(nc, vinfo, nlev_data=nlev_data)
+        a_eff, b_eff, p0_eff, flipped = damip._read_hybrid_coeffs(nc, vinfo, nlev_data=nlev_data)
 
         # Exact pairwise average of the 4 interface values -> 3 midlayer values.
-        np.testing.assert_array_almost_equal(a_eff, [1000.0, 4000.0, 8000.0])
-        np.testing.assert_array_almost_equal(b_eff, [0.8, 0.4, 0.1])
+        # Already TOA->sfc (b ascending) -> no flip.
+        assert flipped is False
+        np.testing.assert_array_almost_equal(a_eff, [8000.0, 4000.0, 1000.0])
+        np.testing.assert_array_almost_equal(b_eff, [0.1, 0.4, 0.8])
         assert p0_eff == 1.0  # hybrid_ap_b convention: p = ap*1 + b*ps
 
         # Feed into hybrid_to_plev_mass_conserving -- must NOT raise IndexError
@@ -473,6 +479,70 @@ def test_read_hybrid_coeffs_ap_b_interface_convention_averaged_to_midlayer(tmp_p
                                                      target_toa2sfc_pa)
         assert out.shape == (2, 1, 1)
         assert np.all(np.isfinite(out))
+
+
+def test_read_hybrid_coeffs_sfc_to_toa_order_detected_and_flipped(tmp_path):
+    """Regression test for a real bug hit against actual downloaded
+    IPSL-CM6A-LR hist-aer data (WP-M4.5), found AFTER the interface-averaging
+    fix above by sanity-checking output cloud fractions against the raw
+    input's actual magnitude (build succeeded but produced near-zero camt/
+    cliq/cice everywhere, despite raw cl having mean=8.4%, max=97.9%).
+
+    IPSL stores hybrid levels surface->TOA (confirmed: its `presnivs`
+    diagnostic coordinate runs ~1012 hPa at index 0 down to ~1.5 Pa at the
+    last index; its raw ap/b interface arrays likewise have b descending
+    from 1.0 toward 0.0). hybrid_to_plev_mass_conserving's only prior use
+    (CESM2) is TOA->sfc, and the calling code silently assumed that
+    direction for every model without checking. _read_hybrid_coeffs must
+    detect the direction from b and reverse the coefficients (reporting
+    `flipped=True` so the caller also reverses the field data the same way
+    -- reversing only one side scrambles the profile without erroring).
+    """
+    path = str(tmp_path / 'cl_hybrid_sfc_to_toa.nc')
+    with Dataset(path, 'w') as nc:
+        nc.createDimension('presnivs', 3)
+        nc.createDimension('klevp1', 4)
+        nc.createVariable('presnivs', 'f8', ('presnivs',))[:] = [101200, 50000, 5]
+        # Interface coefficients in IPSL's real sfc->TOA direction: b
+        # descends from 1.0 (surface) to 0.0 (TOA).
+        ap_iface = [0.0, 2000.0, 6000.0, 10000.0]
+        b_iface = [1.0, 0.6, 0.2, 0.0]
+        nc.createVariable('ap', 'f8', ('klevp1',))[:] = ap_iface
+        nc.createVariable('b', 'f8', ('klevp1',))[:] = b_iface
+        # Field data ALSO stored sfc->TOA to match: large near-surface
+        # (index 0), ~0 near TOA (index -1) -- like real cloud fraction.
+        nc.createVariable('cl', 'f8', ('presnivs',))[:] = [40.0, 20.0, 1.0]
+
+    with Dataset(path) as nc:
+        from data import cmip6_common as common
+        vinfo = {'scheme': 'hybrid_ap_b', 'ap': 'ap', 'b': 'b'}
+        a_eff, b_eff, p0_eff, flipped = damip._read_hybrid_coeffs(nc, vinfo, nlev_data=3)
+
+        assert flipped is True
+        # Midlayer average of the (still sfc->TOA) interface values is
+        # [0.8, 0.4, 0.1] for b (matching the ascending-b test above's
+        # midlayer numbers, just not yet reversed) -- after the flip it must
+        # come out reversed and ascending (TOA->sfc): b_eff[0] < b_eff[-1].
+        np.testing.assert_array_almost_equal(b_eff, [0.1, 0.4, 0.8])
+        assert b_eff[0] < b_eff[-1]
+
+        # The caller must reverse the field the same way; simulate that here
+        # and confirm the mass-conserving projection produces a physically
+        # sane (not near-zero-everywhere) result concentrated near the
+        # surface, matching the input's actual near-surface concentration.
+        cl_native = np.array([40.0, 20.0, 1.0]).reshape(3, 1, 1)
+        cl_toa2sfc = cl_native[::-1] if flipped else cl_native
+        ps_2d = np.array([[101300.0]])
+        # Last level well below ps (not equal to it) so the final target
+        # layer [70000, ps] has genuine width and can capture the
+        # near-surface (~820 hPa) hybrid layer where cl_native's 40.0 lives.
+        target_toa2sfc_pa = np.array([5000.0, 70000.0])
+        out = common.hybrid_to_plev_mass_conserving(cl_toa2sfc, a_eff, b_eff, p0_eff, ps_2d,
+                                                     target_toa2sfc_pa)
+        assert np.all(np.isfinite(out))
+        # Surface-adjacent target layer must retain a substantial (not
+        # near-zero) fraction of the input's near-surface cloud amount.
+        assert out[-1, 0, 0] > 5.0
 
 
 def test_read_hybrid_coeffs_ab_p0_matching_length_not_averaged(tmp_path):
@@ -494,6 +564,7 @@ def test_read_hybrid_coeffs_ab_p0_matching_length_not_averaged(tmp_path):
 
     with Dataset(path) as nc:
         vinfo = {'scheme': 'hybrid_ab_p0', 'a': 'a', 'b': 'b', 'p0': 'p0'}
-        a_eff, b_eff, p0_eff = damip._read_hybrid_coeffs(nc, vinfo, nlev_data=3)
+        a_eff, b_eff, p0_eff, flipped = damip._read_hybrid_coeffs(nc, vinfo, nlev_data=3)
+        assert flipped is False
         np.testing.assert_array_equal(a_eff, [0.01, 0.02, 0.0])
         np.testing.assert_array_equal(b_eff, [0.0, 0.3, 0.98])
