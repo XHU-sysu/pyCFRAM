@@ -1,0 +1,10 @@
+# DAMIP model quirks: MRI-ESM2-0 (docs/plan_ph3.md §4.2, §1.4)
+#
+# Full-variable model (14/14 vars incl. o3) -- M4 second full-variable baseline.
+institution_id: MRI
+default_variant: r1i1p1f1
+default_grid: gn
+calendar: proleptic_gregorian
+warm_years_default: [2011, 2020]
+vertical:
+  scheme: auto                  # expect hybrid_ap_b (CMOR mainstream convention)
