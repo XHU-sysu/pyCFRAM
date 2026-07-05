@@ -611,6 +611,13 @@ class CMIP6DamipSource(DataSource):
             # assumes every field shares one lat/lon.
             if lat_o3.shape != lat.shape or lon_o3.shape != lon.shape or \
                     not np.array_equal(lat_o3, lat) or not np.array_equal(lon_o3, lon):
+                # CMIP6's below-ground-plev masking (NaN at the surface end
+                # of the level axis, e.g. over high terrain) must be
+                # held-filled BEFORE bilinear regridding, or the NaN bleeds
+                # into neighboring valid cells during interpolation (real
+                # bug hit against MRI-ESM2-0's o3: ~23% NaN at 1000 hPa).
+                climo_o3_b = common.fill_nan_hold_toward_surface(climo_o3_b)
+                climo_o3_w = common.fill_nan_hold_toward_surface(climo_o3_w)
                 climo_o3_b = common.regrid_horizontal_bilinear(lat_o3, lon_o3, climo_o3_b, lat, lon)
                 climo_o3_w = common.regrid_horizontal_bilinear(lat_o3, lon_o3, climo_o3_w, lat, lon)
             plev_o3_use = plev_o3 if plev_o3 is not None else plev_ta

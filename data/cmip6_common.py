@@ -377,6 +377,53 @@ def normalize_grid(lat, lon, data=None):
     return lat_out, lon_out, data_out
 
 
+def fill_nan_hold_toward_surface(field):
+    """Fill NaN in a (nlev, nlat, nlon) field, sfc->TOA level order, by
+    holding the shallowest valid (non-NaN) level's value down through a
+    masked run at the surface end.
+
+    CMIP6's standard convention for plev-based variables masks
+    below-ground cells (``plev > local ps``, e.g. the 1000/925 hPa levels
+    over the Tibetan Plateau) with the file's ``_FillValue`` -> NaN once
+    read. For a sfc->TOA ordered level axis this masking is always a
+    contiguous run starting at index 0 (real physics resumes once plev
+    drops below the local terrain's ps). This function exists specifically
+    to precede `regrid_horizontal_bilinear`: bilinear interpolation
+    propagates a NaN input cell into its output neighbors (not just the
+    original masked point), so horizontally regridding a field with this
+    masking pattern still present corrupts more cells than were originally
+    missing (real bug hit for MRI-ESM2-0's o3, which needs `
+    regrid_horizontal_bilinear` because its native grid is coarser than the
+    model's other Amon variables -- WP-M4.5). The final, physically precise
+    subsurface fill (using the TARGET grid's own ps) still happens later in
+    `fill_subsurface`; this is only a NaN-propagation guard for the
+    intermediate native-grid regridding step.
+
+    Parameters
+    ----------
+    field : (nlev, nlat, nlon) ndarray, sfc->TOA level order.
+
+    Returns
+    -------
+    (nlev, nlat, nlon) ndarray with the surface-end NaN run filled.
+    Columns that are entirely NaN are left untouched (a genuinely
+    all-missing column is a different, more serious problem than this
+    function is meant to paper over -- let it surface downstream).
+    """
+    field = np.asarray(field, dtype=np.float64)
+    isnan = np.isnan(field)
+    valid = ~isnan
+    all_nan = ~valid.any(axis=0)
+    first_valid_idx = np.argmax(valid, axis=0)  # first True; 0 if column is all-valid or all-NaN
+    fill_val = np.take_along_axis(field, first_valid_idx[None, ...], axis=0)[0]
+
+    out = field.copy()
+    for k in range(field.shape[0]):
+        mask_k = isnan[k] & ~all_nan
+        out[k] = np.where(mask_k, fill_val, out[k])
+    return out
+
+
 def regrid_horizontal_bilinear(lat_src, lon_src, field_src, lat_tgt, lon_tgt):
     """Bilinear regrid of a (..., nlat_src, nlon_src) field to (nlat_tgt,
     nlon_tgt), periodic in longitude.

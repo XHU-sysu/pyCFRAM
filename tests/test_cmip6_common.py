@@ -300,6 +300,42 @@ def test_normalize_grid_no_data_arg():
 
 
 # ---------------------------------------------------------------------------
+# 4a2. fill_nan_hold_toward_surface — CMIP6 below-ground-plev masking guard
+# (real bug: MRI-ESM2-0's o3 has ~23% NaN at 1000 hPa, tapering to 0% by
+# 600 hPa -- below-ground terrain masking -- which bilinear regridding
+# would otherwise spread into valid neighboring cells)
+# ---------------------------------------------------------------------------
+
+def test_fill_nan_hold_toward_surface_fills_surface_end_run():
+    # (nlev=4, nlat=1, nlon=2), sfc->TOA. Column 0 has NaN at levels 0-1
+    # (below-ground at that terrain point); column 1 has no missing data.
+    field = np.array([
+        [[np.nan, 10.0]],
+        [[np.nan, 11.0]],
+        [[5.0, 12.0]],
+        [[6.0, 13.0]],
+    ])
+    out = common.fill_nan_hold_toward_surface(field)
+    assert not np.any(np.isnan(out))
+    # Column 0's masked levels held at the shallowest valid level's value (5.0).
+    np.testing.assert_array_equal(out[:, 0, 0], [5.0, 5.0, 5.0, 6.0])
+    # Column 1 (no NaN) passes through unchanged.
+    np.testing.assert_array_equal(out[:, 0, 1], [10.0, 11.0, 12.0, 13.0])
+
+
+def test_fill_nan_hold_toward_surface_leaves_all_nan_column_untouched():
+    field = np.full((3, 1, 1), np.nan)
+    out = common.fill_nan_hold_toward_surface(field)
+    assert np.all(np.isnan(out))  # not silently zero-filled or otherwise papered over
+
+
+def test_fill_nan_hold_toward_surface_no_nan_is_noop():
+    field = np.arange(24.0).reshape(4, 2, 3)
+    out = common.fill_nan_hold_toward_surface(field)
+    np.testing.assert_array_equal(out, field)
+
+
+# ---------------------------------------------------------------------------
 # 4b. regrid_horizontal_bilinear — cross-model horizontal grid mismatch
 # (real bug: MRI-ESM2-0's o3 is published on a 64x128 grid while every
 # other Amon variable in the same model is 160x320)
