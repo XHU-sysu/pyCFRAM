@@ -82,6 +82,10 @@ def main():
                 print("Run: python3 scripts/build_case_input.py --case %s" % args.case)
                 sys.exit(1)
         run_step('run_parallel_python.py', ['--case', args.case, '--nproc', str(nproc)])
+        # Post-run summary (docs/plan_ph3.md §6.3, WP-M4.4): independent
+        # post-processing script, not coupled into run_parallel_python.py
+        # itself. Only invoked here (run step), never for build/plot.
+        run_step('write_run_summary.py', ['--case', args.case])
 
     if 'plot' in steps:
         run_step('plot_fig3_independent.py', [args.case])
