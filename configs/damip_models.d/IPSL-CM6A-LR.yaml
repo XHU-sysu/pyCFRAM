@@ -1,0 +1,14 @@
+# DAMIP model quirks: IPSL-CM6A-LR (docs/plan_ph3.md §4.2, §1.4)
+#
+# Full-variable model (14/14 vars incl. o3, per the 2026-07-05 ESGF availability
+# matrix) -- the M4 debugging baseline: any pipeline anomaly on this model can't
+# be blamed on missing data.
+institution_id: IPSL
+default_variant: r1i1p1f1
+default_grid: gr              # NOT gn -- IPSL publishes Amon on the 'gr' grid label
+calendar: gregorian             # sanity cross-check only; actual decoding always
+                                 # trusts each file's own `calendar` NetCDF attribute
+warm_years_default: [2011, 2020]
+vertical:
+  scheme: auto                  # runtime formula_terms probe -> expect hybrid_ap_b
+                                 # (ap/b convention, CMOR mainstream, docs/plan_ph3.md §3)
