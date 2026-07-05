@@ -52,7 +52,14 @@ def search_datasets(
         'type': 'Dataset',
         'format': 'application/solr+json',
         'limit': 500,
+        'latest': 'true',
     }
+    # Note: deliberately NOT filtering replica=false here. Some models (e.g.
+    # MRI-ESM2-0) are indexed as replica=true at every node this client
+    # queries (DKRZ/CEDA aren't the model's home data node), so replica=false
+    # returns zero results even though the data is genuinely downloadable.
+    # Cross-data-node duplicates are instead deduplicated client-side by
+    # filename in download_damip.search_damip_files().
     if variant:
         params['variant_label'] = variant
     if grid:
@@ -105,6 +112,7 @@ def list_files(
         'format': 'application/solr+json',
         'limit': 10000,
         'fields': 'title,size,url,checksum,checksum_type',
+        'latest': 'true',
     }
     url = node + '?' + urllib.parse.urlencode(params)
     try:

@@ -47,6 +47,22 @@ CORE_VARIABLES = [
     'hfls', 'hfss', 'huss',
 ]
 
+# Per-model default (variant_label, grid_label), per plan §1.4 / §4.2.
+# Without this, a bare --model search matches every published variant (e.g.
+# IPSL-CM6A-LR hist-aer has 10 variants) and inflates the download volume by
+# several-fold. This is not an optional nicety -- omitting it is a correctness
+# bug, not just a size optimization.
+MODEL_DEFAULTS = {
+    'IPSL-CM6A-LR':    ('r1i1p1f1', 'gr'),
+    'MRI-ESM2-0':      ('r1i1p1f1', 'gn'),
+    'CNRM-CM6-1':      ('r1i1p1f2', 'gr'),
+    'MIROC6':          ('r1i1p1f1', 'gn'),
+    'GISS-E2-1-G':     ('r1i1p1f1', 'gn'),
+    'HadGEM3-GC31-LL': ('r1i1p1f3', 'gn'),
+    'CanESM5':         ('r1i1p1f1', 'gn'),
+    'CESM2':           ('r1i1p1f1', 'gn'),
+}
+
 
 def get_variables_for_model(model: str, experiment: str,
                            nodes: List[str]) -> List[str]:
@@ -112,7 +128,14 @@ def search_damip_files(model: str, experiment: str, base_years: Tuple[int, int],
     if not datasets:
         raise RuntimeError(f"No datasets found for {model} {experiment}")
 
-    # For each dataset, list files and filter by time overlap
+    # For each dataset, list files and filter by time overlap.
+    # The same physical file is commonly indexed at multiple ESGF data nodes
+    # (replicas) even after variant_label+grid_label narrow to one logical
+    # dataset -- dedupe by filename (CMIP6 filenames are unique per
+    # variable/variant/grid/time-range, so identical title == identical
+    # file) rather than by the Solr `replica` flag, which is unreliable
+    # across models (see esgf_fetch.search_datasets docstring/comment).
+    seen_titles = set()
     all_files = []
     for dataset in datasets:
         dataset_id = dataset['id']
@@ -122,10 +145,14 @@ def search_damip_files(model: str, experiment: str, base_years: Tuple[int, int],
             print(f"Warning: Could not list files for {dataset_id}: {e}")
             continue
 
-        # Filter by time overlap
+        # Filter by time overlap, then dedupe by filename
         for f in files:
-            if filename_time_overlap(f['title'], base_years, warm_years):
-                all_files.append(f)
+            if not filename_time_overlap(f['title'], base_years, warm_years):
+                continue
+            if f['title'] in seen_titles:
+                continue
+            seen_titles.add(f['title'])
+            all_files.append(f)
 
     return all_files
 
@@ -294,14 +321,15 @@ Examples:
         total_gb = 0.0
         for model in models:
             warm_years = warm_years_cesm2 if model == 'CESM2' else warm_years_default
+            default_variant, default_grid = MODEL_DEFAULTS.get(model, (None, None))
             try:
                 files = search_damip_files(
                     model=model,
                     experiment=experiment,
                     base_years=base_years,
                     warm_years=warm_years,
-                    variant=args.variant,
-                    grid=args.grid,
+                    variant=args.variant or default_variant,
+                    grid=args.grid or default_grid,
                 )
                 nf, gb = dry_run_report(model, experiment, files)
                 total_files += nf
@@ -317,6 +345,7 @@ Examples:
     # Single model processing
     for model in models:
         warm_years = warm_years_cesm2 if model == 'CESM2' else warm_years_default
+        default_variant, default_grid = MODEL_DEFAULTS.get(model, (None, None))
 
         try:
             files = search_damip_files(
@@ -324,8 +353,8 @@ Examples:
                 experiment=experiment,
                 base_years=base_years,
                 warm_years=warm_years,
-                variant=args.variant,
-                grid=args.grid,
+                variant=args.variant or default_variant,
+                grid=args.grid or default_grid,
             )
         except RuntimeError as e:
             print(f"Error for {model}: {e}", file=sys.stderr)
