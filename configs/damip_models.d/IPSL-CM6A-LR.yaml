@@ -10,5 +10,16 @@ calendar: gregorian             # sanity cross-check only; actual decoding alway
                                  # trusts each file's own `calendar` NetCDF attribute
 warm_years_default: [2011, 2020]
 vertical:
-  scheme: auto                  # runtime formula_terms probe -> expect hybrid_ap_b
-                                 # (ap/b convention, CMOR mainstream, docs/plan_ph3.md §3)
+  # Explicit override, NOT auto -- confirmed against real downloaded data
+  # (2026-07-05) that IPSL's cl/clw/cli files carry bare `ap`/`b`/`ap_bnds`/
+  # `b_bnds` variables on a dim named `presnivs` (not `lev`), with NO
+  # `formula_terms` attribute anywhere linking them (unlike MRI-ESM2-0,
+  # which does have one). Auto-detection (data/cmip6_common.py:
+  # detect_vertical) requires a formula_terms string and has no fallback for
+  # this -- with scheme:auto it would silently fall through to the
+  # already-on-plev branch and reinterpret presnivs (hybrid) levels as if
+  # they were pressure levels, producing wrong (not crashing) cloud fields.
+  # ap/b convention confirmed correct (CMOR mainstream, p = ap + b*ps).
+  scheme: hybrid_ap_b
+  ap: ap
+  b: b
