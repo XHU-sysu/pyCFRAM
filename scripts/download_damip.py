@@ -130,13 +130,18 @@ def search_damip_files(model: str, experiment: str, base_years: Tuple[int, int],
 
     # For each dataset, list files and filter by time overlap.
     # The same physical file is commonly indexed at multiple ESGF data nodes
-    # (replicas) even after variant_label+grid_label narrow to one logical
-    # dataset -- dedupe by filename (CMIP6 filenames are unique per
-    # variable/variant/grid/time-range, so identical title == identical
-    # file) rather than by the Solr `replica` flag, which is unreliable
-    # across models (see esgf_fetch.search_datasets docstring/comment).
-    seen_titles = set()
-    all_files = []
+    # (genuine replicas, e.g. a CNRM-CERFACS file is hosted both at
+    # esg1.umr-cnrm.fr -- the home institution -- and mirrored at
+    # esgf3.dkrz.de with a fully independent URL/thredds path) even after
+    # variant_label+grid_label narrow to one logical dataset. Rather than
+    # picking just one (by the Solr `replica` flag, which is unreliable
+    # across models -- see esgf_fetch.search_datasets docstring/comment --
+    # or by first-seen order), collect EVERY known URL per filename so
+    # download_files() can fall back to an alternate mirror if the first
+    # one times out or errors (real failure hit: CNRM-CM6-1's home node
+    # timed out on cl/clw/cli/rsdt while its DKRZ mirror was reachable).
+    by_title = {}
+    title_order = []
     for dataset in datasets:
         dataset_id = dataset['id']
         try:
@@ -145,16 +150,20 @@ def search_damip_files(model: str, experiment: str, base_years: Tuple[int, int],
             print(f"Warning: Could not list files for {dataset_id}: {e}")
             continue
 
-        # Filter by time overlap, then dedupe by filename
         for f in files:
             if not filename_time_overlap(f['title'], base_years, warm_years):
                 continue
-            if f['title'] in seen_titles:
-                continue
-            seen_titles.add(f['title'])
-            all_files.append(f)
+            title = f['title']
+            if title not in by_title:
+                by_title[title] = dict(f)
+                by_title[title]['urls'] = [f['url']]
+                del by_title[title]['url']
+                title_order.append(title)
+            else:
+                if f['url'] not in by_title[title]['urls']:
+                    by_title[title]['urls'].append(f['url'])
 
-    return all_files
+    return [by_title[t] for t in title_order]
 
 
 def format_size(size_bytes: int) -> str:
@@ -230,7 +239,9 @@ def download_files(model: str, experiment: str, files: List[dict],
     manifest = []
     for i, f in enumerate(files, 1):
         title = f['title']
-        url = f['url']
+        # 'urls' (plural, from search_damip_files) is the normal path;
+        # fall back to a single 'url' key for any other caller.
+        urls = f.get('urls') or ([f['url']] if 'url' in f else [])
         checksum = f.get('checksum', '')
         checksum_type = f.get('checksum_type', 'sha256')
 
@@ -244,14 +255,26 @@ def download_files(model: str, experiment: str, files: List[dict],
                 continue
 
         dest = dest_dir / title
-        try:
-            if verbose:
-                print(f"[{i}/{len(files)}] {title}...")
-            fetch(url, str(dest), checksum=checksum, checksum_type=checksum_type,
-                  expected_size=f.get('size', 0))
+        last_error = None
+        succeeded_url = None
+        for url_idx, url in enumerate(urls):
+            try:
+                if verbose:
+                    mirror_note = f" (mirror {url_idx + 1}/{len(urls)})" if url_idx > 0 else ""
+                    print(f"[{i}/{len(files)}] {title}{mirror_note}...")
+                fetch(url, str(dest), checksum=checksum, checksum_type=checksum_type,
+                      expected_size=f.get('size', 0))
+                succeeded_url = url
+                break
+            except RuntimeError as e:
+                last_error = e
+                if verbose and url_idx < len(urls) - 1:
+                    print(f"  ✗ {e} -- trying next mirror", file=sys.stderr)
+
+        if succeeded_url:
             manifest_entry = {
                 'title': title,
-                'url': url,
+                'url': succeeded_url,
                 'size': f.get('size', 0),
                 'checksum': checksum,
                 'checksum_type': checksum_type,
@@ -259,8 +282,8 @@ def download_files(model: str, experiment: str, files: List[dict],
             manifest.append(manifest_entry)
             if verbose:
                 print(f"  ✓ {format_size(f.get('size', 0))}")
-        except RuntimeError as e:
-            print(f"  ✗ Error: {e}", file=sys.stderr)
+        else:
+            print(f"  ✗ Error (all {len(urls)} mirror(s) failed): {last_error}", file=sys.stderr)
             # Don't add to manifest if download failed
 
     # Write manifest
