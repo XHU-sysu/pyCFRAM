@@ -8,7 +8,15 @@ default_grid: gr
 calendar: gregorian
 warm_years_default: [2011, 2020]
 vertical:
-  scheme: auto   # NOT yet confirmed against real data -- verify formula_terms
-                 # once downloaded; IPSL needed an explicit override despite
-                 # being predicted "auto-friendly" too (docs/plan_ph3.md
-                 # session log, WP-M4.5), so don't assume this holds.
+  # Explicit override, NOT auto -- confirmed against real downloaded data:
+  # CNRM's `lev` coordinate uses a non-standard CMOR attribute name
+  # `formula_term` (singular -- a CNRM/CERFACS CMOR-configuration quirk, not
+  # the standard CF `formula_terms`), so cmip6_common.detect_vertical's
+  # auto-probe never finds it and falls through to the wrong (already-on-
+  # plev) branch. ap/b are already at cl's own midlayer resolution (91==91,
+  # no interface-averaging needed, unlike IPSL) and stored surface->TOA
+  # (b descends 0.998->0.0) -- the existing generic order-flip detection in
+  # _read_hybrid_coeffs handles that automatically once the scheme is known.
+  scheme: hybrid_ap_b
+  ap: ap
+  b: b
