@@ -340,3 +340,50 @@ Production runs happen on the `hqlx*` cluster:
 Checked-in compiled binaries are **not** committed; a fresh clone on any
 system runs `cd fortran && make` (intel by default, `TOOLCHAIN=gnu` on Mac
 or any gfortran-only host).
+
+---
+
+## 12. Phase 3: DAMIP multi-model data source
+
+A registered data source (`data/cmip6_damip_source.py`, `@register_source
+('cmip6_damip')`) lets pyCFRAM ingest any CMIP6 DAMIP single-forcing
+experiment (`hist-aer`, `hist-GHG`, ...) from any contributing model,
+without touching `core/` or `fortran/` — same generic writer
+(`scripts/build_case_input.py`) and same Fortran engine as ERA5/CESM2. Full
+architecture, IO contract, and worked bug-fix examples are in
+[`docs/m4_damip_module.md`](m4_damip_module.md); per-model support matrix
+and known-issues are in
+[`docs/m5_multimodel_userguide.md`](m5_multimodel_userguide.md). Short
+version, since the Chinese technical notes carry the exhaustive account:
+
+- **Model-agnostic numerics** live in `data/cmip6_common.py`: calendar-aware
+  time decoding (`cftime`, correct for noleap/365_day/360_day/gregorian/
+  proleptic_gregorian — the naive `days/365.0` arithmetic used before this
+  module is silently wrong for anything but noleap), hybrid-sigma-pressure
+  coefficient-naming detection (`p = a·p0 + b·ps` vs `p = ap + b·ps`),
+  log-pressure plev re-interpolation, bilinear horizontal regrid (needed
+  when a variable is published on a coarser native grid than its own
+  model's siblings — confirmed for MRI-ESM2-0's `o3`), and an analytic TOA
+  insolation fallback for the ~40% of candidate models that don't publish
+  `rsdt`.
+- **Per-model quirks** are pure YAML (`configs/damip_models.d/<model>.yaml`)
+  — default variant/grid, calendar, and an explicit hybrid-coefficient
+  override for models whose `formula_terms` CF attribute is missing (IPSL)
+  or non-standard (CNRM's `formula_term`, singular). Adding a model that
+  fits the standard cases needs **zero Python changes** — see
+  `docs/m5_multimodel_userguide.md`'s NorESM2-LM worked example.
+- **Missing cloud/O₃/`rsdt` is the norm, not the exception**: of 13
+  candidate hist-aer models surveyed, only 3 publish all needed variables.
+  A documented decision tree (build-time, not a post-hoc hook — the
+  writer's `validate_states()` rejects non-finite values before any file
+  is written) resolves each gap to a physically inert fallback (e.g.
+  injected O₃ climatology with `frc_o3 ≡ 0` by construction) and records
+  the choice in `provenance.json`, surfaced in a human-readable
+  `*.summary.txt` after every run.
+- **ESGF acquisition** (`data/esgf_fetch.py` + `scripts/download_damip.py`)
+  is pure stdlib `urllib` — no `requests`/`intake-esgf` — and downloads
+  without authentication (DKRZ/CEDA Solr search + HTTP Range requests).
+- Coverage of the three new modules: 96–99% (`coverage run -m pytest
+  tests/ -q && coverage report -m --include="*/data/cmip6_common.py,
+  */data/cmip6_damip_source.py,*/data/esgf_fetch.py"`), well above the
+  60% contract gate.

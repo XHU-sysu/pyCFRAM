@@ -186,76 +186,141 @@ ssh mini 'ssh lzhenn@hqlx210 "cd /home/lzhenn/work/ust-jumper/pyCFRAM && \
 
 ---
 
-## 如何接入新模式（M5.3 指南预告）
+## 如何接入新模式（M5.3，已完成 + 已验证）
 
-M5.3 工作包（WP-M5.3，由另一 Sonnet agent 负责）将交付完整的"仅用 yaml 接入新模式"指南与可运行示例。简要流程如下：
+WP-M5.3 的验收标准是：**接入一个不在 M4/M5 八模式清单内的全新模式，全程只写
+`configs/damip_models.d/<model>.yaml` + `cases/<case>/case.yaml` 两个 yaml 文件，
+不碰任何 Python 代码（尤其 `core/` 与 `fortran/` 零改动）**。下面是已经跑通、
+用真实 ESGF 下载数据端到端验证过的 NorESM2-LM 例子——它不在 §2 表 1 的八模式
+清单里，是"故意选一个全新模式"来证明这条接入路径是真实可行的，不是理论上的。
 
-### 最小化接入流程
+### 第一步：`configs/damip_models.d/NorESM2-LM.yaml`
 
-1. **在 `configs/damip_models.d/` 下创建 `<model>.yaml`**  
-   示例（NorESM2-LM，备选池中的缺云模式）：
-   ```yaml
-   # configs/damip_models.d/NorESM2-LM.yaml
-   model_name: NorESM2-LM
-   grid_label: gn
-   variant_label: r1i1p1f1
-   
-   # hist-aer base 和 warm 十年范围（per-model 差异）
-   base_years: [1850, 1859]
-   warm_years: [2011, 2020]
-   
-   # 垂直坐标（如需显式配置，可选）
-   # vertical:
-   #   scheme: hybrid_ap_b
-   #   ap: ap
-   #   b: b
-   ```
+NorESM2-LM 与 CESM2/CanESM5 同类，属于"缺云 + 缺 O₃ + 缺 rsdt"的全套跳过型模式
+（`docs/plan_ph3.md` §1.4 备选池成员）。完整文件（14 行，无需任何 Python 改动）：
 
-2. **在 `cases/` 下创建 case 目录与 `case.yaml`**  
-   ```bash
-   mkdir -p cases/damip_noresm2lm_histaer
-   ```
-   ```yaml
-   # cases/damip_noresm2lm_histaer/case.yaml
-   case: damip_noresm2lm_histaer
-   
-   source:
-     type: cmip6_damip
-     model: NorESM2-LM
-     experiment_id: hist-aer
-     data_dir: /path/to/raw_data/noresm2lm_hist_aer
-   
-   input:
-     default_years: [1850, 2020]
-   
-   grid:
-     pressure_levels: [100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
-   ```
+```yaml
+# configs/damip_models.d/NorESM2-LM.yaml
+# WP-M5.3 custom-source-accession example: a model NOT in the M4/M5
+# 8-model set, added purely via this yaml + a case.yaml (no core/fortran
+# changes, no data/scripts changes). Missing cl/clw/cli/rsdt/o3 -- another
+# "skip full house" demonstrator like CESM2/CanESM5, verified against real
+# downloaded data (2026-07-06).
+institution_id: NCC
+default_variant: r1i1p1f1
+default_grid: gn
+calendar: noleap
+warm_years_default: [2011, 2020]
+missing_ok: [cl, clw, cli, rsdt, o3]
+vertical:
+  scheme: auto   # irrelevant in practice (no cloud data published)
+```
 
-3. **运行 build**  
-   ```bash
-   python3 run_case.py damip_noresm2lm_histaer --step build
-   ```
+### 第二步：`cases/damip_noresm2_histaer/case.yaml`
 
-### 验证清单
+与其它八个模式的 case.yaml 结构完全一致（同一套 `source.type: cmip6_damip`
+注册插件，同一套 §4.1 模板），只是把 `model`/`raw_dir` 换成 NorESM2-LM 自己的：
 
-- [ ] 检查 `cases/damip_noresm2lm_histaer/output/damip_noresm2lm_histaer.summary.txt` 中是否有 ERROR
-- [ ] 确认输入 NC 生成：`cases/damip_noresm2lm_histaer/input/{base,perturbed}_{pres,surf}.nc`
-- [ ] 若缺云/缺 O₃/缺太阳，summary 应正确标记缺省原因
+```yaml
+case_name: DAMIP_NorESM2_histaer
+description: "NorESM2-LM hist-aer, first decade (1850-1859) vs last decade (2011-2020) climatology (custom-source-accession example, WP-M5.3)"
 
-### 何时需要改代码
+source:
+  type: cmip6_damip
+  model: NorESM2-LM
+  experiment: hist-aer
+  variant: r1i1p1f1
+  grid_label: gn
+  raw_dir: raw_data/cmip6_damip/NorESM2-LM/hist-aer
+  base_years: [1850, 1859]
+  warm_years: [2011, 2020]
+  co2:
+    source: constant
+    base_ppmv: 284.7
+    perturbed_ppmv: 284.7
+  o3: auto
+  aerosol:
+    source: zero
 
-**不需改代码的场景**（纯 yaml）：
-- 模式用标准 hybrid-pressure 坐标 + CF `formula_terms` 属性 ✓
+grid:
+  pressure_levels: [1, 5, 10, 20, 30, 50, 70, 100, 150, 200, 250, 300,
+                    400, 500, 600, 700, 850, 925, 1000]
+
+input:
+  base_pres: input/base_pres.nc
+  base_surf: input/base_surf.nc
+  perturbed_pres: input/perturbed_pres.nc
+  perturbed_surf: input/perturbed_surf.nc
+  nonrad_forcing: input/nonrad_forcing.nc
+
+radiation:
+  scheme: rrtmg
+
+run:
+  nproc: auto
+
+plot:
+  key_region: {lon: [0, 360], lat: [-90, 90]}
+```
+
+### 第三步：build + run
+
+```bash
+python3 run_case.py damip_noresm2_histaer --step build
+python3 run_case.py damip_noresm2_histaer --step run --nproc 200
+```
+
+### 实测结果（2026-07-06，hqlx210，真实 ESGF 下载数据）
+
+- **build 一次成功**，未触发任何异常路径的额外调试。
+- **run 耗时 87.5 秒**，13824 个格点（NorESM2-LM 原生 96×144 网格）。
+- `cfram_result.nc` **零 NaN**。
+- 恒等式 `dT_sfcdyn = dT_ocndyn + dT_lhflx + dT_shflx` 残差 **~4.6e-15 K**（机器精度）。
+- 全球均值 `dT_observed[sfc] = -1.05 K`（净冷却，符号正确——hist-aer 人为气溶胶
+  强迫在历史期是净冷却信号）。
+- 北半球 `-1.72 K` 冷于南半球 `-0.37 K`（符合预期：人为气溶胶集中在北半球工业带）。
+
+### 永久回归门：`tests/test_damip_userguide_example.py`
+
+这个测试文件是本例子的**永久验收门**，不是一次性验证：
+
+- `test_phase3_diff_never_touches_core_or_fortran`：对整个 Phase 3 分支（相对其
+  起点 commit）做 `git diff --name-only`，断言 `core/`、`fortran/` 目录下**零**
+  改动文件——这是 M5 合同验收口径的机械化断言，不是针对 NorESM2-LM 一次性的检查。
+- `test_noresm2_model_config_exists_and_is_yaml_only`：确认
+  `configs/damip_models.d/NorESM2-LM.yaml` 与 `cases/damip_noresm2_histaer/
+  case.yaml` 存在。
+- `test_noresm2_case_uses_registered_cmip6_damip_source`：确认该 case 走的是
+  **与其它八个模式完全相同**的已注册 `cmip6_damip` 插件，不是自定义的一次性代码
+  路径。
+
+```bash
+pytest tests/test_damip_userguide_example.py -v
+```
+
+### 何时需要改代码（框架增强 vs 纯 yaml）
+
+**不需改代码的场景**（纯 yaml，NorESM2-LM 属于此类）：
+- 模式用标准 hybrid-pressure 坐标 + CF `formula_terms` 属性，或压根没有云数据
+  需要处理 ✓
 - 模式用标准 `cl/clw/cli` 变量名 ✓
-- 日历为 gregorian/proleptic_gregorian/365_day/noleap/360_day（cftime 支持）✓
+- 日历为 gregorian/proleptic_gregorian/365_day/noleap/360_day（cftime 全部支持）✓
+- 模式缺云/缺 O₃/缺 rsdt——决策树（见 §2 表 2）在 `build_states()` 内部自动处理，
+  models.d 只需 `missing_ok:` 声明性标注（供人工核对，不驱动实际逻辑）
 
-**需要改代码的场景**（框架增强）：
-- 模式用非标准属性名（如 CNRM 的 `formula_term` 单数）→ 在 models.d yaml 加 `vertical:` 块（不改 Python）
-- 模式用 hybrid-height 而非 hybrid-pressure → 计入 known-issue，cloud=SKIP（暂不支持）
-- 模式用 CMIP6 之外的变量命名/单位 → 在 `data/cmip6_damip_source.py` 中加 load function + 在 models.d 注册来源（属框架增强）
+**需要改代码的场景**（框架增强，真实遇到过的例子）：
+- 模式用非标准属性名（CNRM 的 `formula_term` 单数）→ 在 models.d yaml 显式给
+  `vertical: {scheme: hybrid_ap_b, ap: ap, b: b}`（仍然是加 yaml，不改 Python——
+  见 KI-1）
+- 模式用 hybrid-height 而非 hybrid-sigma-pressure（HadGEM3）→ 已有的
+  `ValueError` 捕获自动降级为 `cloud=SKIPPED`（见 KI-2），无需新代码；若要真正
+  支持 hybrid-height 转换（需要模式自身温度廓线做高度→气压反演）才算框架增强，
+  属 Phase 3 之外的 backlog
+- 模式用 CMIP6 之外的变量命名/单位体系 → 需要在 `data/cmip6_damip_source.py`
+  加一个新的 load 分支（这才是真正的"改代码"），目前 13 个候选模式中未遇到过
 
-更详细的指南见 WP-M5.3 输出的 `docs/m5_damip_custom_models.md`（或相关 M5.3 agent 的文档）。
+详见 `docs/m4_damip_module.md`（M4 模块的完整架构文档，含 `build_states()` 十步
+流程与决策树的实现细节）。
 
 ---
 

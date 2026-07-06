@@ -351,6 +351,53 @@ python run_case.py cesm2_4xco2_official --step lr
 python run_case.py cesm2_4xco2_official --step lr-attr
 ```
 
+## Phase 3: DAMIP Multi-Model Support
+
+Beyond ERA5/MERRA-2 and the single CESM2 4×CO2 dataset above, pyCFRAM can
+decompose **any CMIP6 DAMIP single-forcing experiment** (`hist-aer`,
+`hist-GHG`, `hist-nat`, `hist-stratO3`, ...) from **any** contributing
+model — a registered `cmip6_damip` data source
+(`data/cmip6_damip_source.py`) auto-detects each model's calendar, hybrid
+vertical-coordinate naming, native horizontal grid, and published pressure
+levels, and applies a documented missing-variable decision tree (cloud/O₃/
+solar/aerosol all have well-defined fallbacks) so that models missing
+cloud or ozone data — the common case, not the exception, across CMIP6 —
+still produce a physically valid decomposition. Base/perturbed states are
+the experiment's first-decade (1850–1859) vs last-available-decade
+climatology; a from-scratch, authentication-free ESGF download client
+(`data/esgf_fetch.py` + `scripts/download_damip.py`) handles data
+acquisition. As with the rest of pyCFRAM, `core/` and `fortran/` are
+untouched by any of this — DAMIP support is entirely a new data-source
+plugin feeding the existing generic writer and CFRAM engine.
+
+Nine models are validated end-to-end against real downloaded ESGF data:
+IPSL-CM6A-LR, MRI-ESM2-0, CESM2, CNRM-CM6-1, MIROC6, GISS-E2-1-G,
+HadGEM3-GC31-LL, and CanESM5 (the M4/M5 model set), plus NorESM2-LM as a
+worked "custom model accession" example showing that adding a model not in
+that list requires touching only a `configs/damip_models.d/<model>.yaml`
+and a `cases/<case>/case.yaml` — no Python changes. Each has a
+corresponding case directory:
+
+```
+cases/damip_{ipsl,mri,cesm2,cnrm,miroc6,giss,hadgem3,canesm5,noresm2}_histaer/
+```
+
+```bash
+# Build + run any DAMIP case exactly like an ERA5/CESM2 case:
+python3 run_case.py damip_ipsl_histaer --step build
+python3 run_case.py damip_ipsl_histaer --step run --nproc 200
+# Every run writes a human-readable cases/<case>/output/<case>.summary.txt
+# recording which processes were ACTIVE/SKIPPED/CLIMATOLOGY/ANALYTIC and why.
+```
+
+See [docs/plan_ph3.md](docs/plan_ph3.md) for the full Phase 3 execution
+plan (DAMIP protocol, cross-model heterogeneity strategy, ESGF data
+availability matrix), [docs/m4_damip_module.md](docs/m4_damip_module.md)
+for the module's architecture and the concrete cross-model bugs that
+shaped it, and [docs/m5_multimodel_userguide.md](docs/m5_multimodel_userguide.md)
+for the per-model support matrix, known-issues log, and the worked
+new-model-accession example.
+
 ## Input Data Format
 
 See [docs/input_spec.md](docs/input_spec.md) for the standard NetCDF input format. pyCFRAM takes any two atmospheric states (base, perturbed) — it does not prescribe how they are defined.
