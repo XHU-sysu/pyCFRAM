@@ -109,6 +109,47 @@ def test_full_variable_ipsl_all_active_and_no_nan():
     assert warm['camt'].min() >= 0.0 and warm['camt'].max() <= 1.0
 
 
+def test_cloud_degrades_gracefully_on_unsupported_vertical_coordinate(monkeypatch):
+    """Regression test for a real bug hit building damip_hadgem3_histaer:
+    HadGEM3-GC31-LL's cl uses a hybrid-HEIGHT coordinate
+    ("a: lev b: b orog: orog", z = a + b*orog) rather than hybrid-sigma-
+    PRESSURE -- cmip6_common.detect_vertical raises ValueError for a
+    formula_terms string it doesn't recognize. Supporting hybrid-height
+    would need a genuinely different physical conversion, out of scope per
+    plan §3/R4 ("framework enhancement", not a per-model config fix) --
+    the correct behavior is to degrade to cloud=SKIPPED, not crash the
+    whole case build. Monkeypatch detect_vertical to force the ValueError
+    (the real failure mode) rather than constructing a whole new
+    hybrid-height fixture -- this tests the exception-handling path
+    directly, independent of detect_vertical's own (separately tested)
+    format-recognition logic.
+    """
+    def raise_unrecognized(*args, **kwargs):
+        raise ValueError("detect_vertical: unrecognized formula_terms 'a: lev b: b orog: orog'")
+
+    monkeypatch.setattr(damip.common, 'detect_vertical', raise_unrecognized)
+
+    cfg = _base_cfg(IPSL_RAW_DIR, 'IPSL-CM6A-LR', grid_label='gr')
+    src = damip.CMIP6DamipSource(cfg)
+    base, warm, nonrad = src.build_states()  # must not raise
+
+    _assert_no_nan(base, 'base')
+    _assert_no_nan(warm, 'warm')
+
+    proc = src.provenance['processes']
+    assert proc['cloud']['status'] == 'SKIPPED'
+    assert 'vertical coordinate unsupported' in proc['cloud']['reason']
+    assert np.all(base['camt'] == 0.0)
+    assert np.all(base['cliq'] == 0.0)
+    assert np.all(base['cice'] == 0.0)
+
+    # Other processes (o3, solar, flux, albedo) must be unaffected -- only
+    # cloud degrades.
+    assert proc['o3']['status'] == 'MODEL'
+    assert proc['solar']['status'] == 'ACTIVE'
+    assert proc['flux']['status'] == 'ACTIVE'
+
+
 def test_full_variable_ipsl_exact_deltas():
     """ta/ts/rsdt/hfls/hfss/o3 all use per-year-constant fixture values with
     base_years=[1850,1851] / warm_years=[1854,1855] both non-leap pairs

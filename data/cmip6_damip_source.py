@@ -534,51 +534,70 @@ class CMIP6DamipSource(DataSource):
                 cloud_reason = 'cl/clw/cli files present but data is all-NaN/fill'
 
         if cloud_ok:
-            with Dataset(files['cl'][0]) as nc0:
-                cl_var = nc0.variables['cl']
-                formula_terms = getattr(cl_var, 'formula_terms', None)
-                if formula_terms is None and 'lev' in nc0.variables:
-                    formula_terms = getattr(nc0.variables['lev'], 'formula_terms', None)
+            try:
+                with Dataset(files['cl'][0]) as nc0:
+                    cl_var = nc0.variables['cl']
+                    formula_terms = getattr(cl_var, 'formula_terms', None)
+                    if formula_terms is None and 'lev' in nc0.variables:
+                        formula_terms = getattr(nc0.variables['lev'], 'formula_terms', None)
 
-                vertical_cfg = model_cfg.get('vertical') or {'scheme': 'auto'}
-                override = None if vertical_cfg.get('scheme', 'auto') == 'auto' else vertical_cfg
-                is_hybrid = (override is not None) or (formula_terms is not None)
+                    vertical_cfg = model_cfg.get('vertical') or {'scheme': 'auto'}
+                    override = None if vertical_cfg.get('scheme', 'auto') == 'auto' else vertical_cfg
+                    is_hybrid = (override is not None) or (formula_terms is not None)
 
-                if is_hybrid:
-                    vinfo = common.detect_vertical(formula_terms=formula_terms, override=override)
-                    a_eff, b_eff, p0_eff, coeffs_flipped = _read_hybrid_coeffs(
-                        nc0, vinfo, nlev_data=cl_b_frac.shape[0])
+                    if is_hybrid:
+                        # detect_vertical raises ValueError for a formula_terms
+                        # string it doesn't recognize -- confirmed real case:
+                        # HadGEM3-GC31-LL's cl uses a hybrid-HEIGHT coordinate
+                        # ("a: lev b: b orog: orog", i.e. z = a + b*orog) rather
+                        # than hybrid-sigma-PRESSURE ("p = ap + b*ps" or
+                        # "p = a*p0 + b*ps"). Supporting hybrid-height would need
+                        # a genuinely different physical conversion (height ->
+                        # pressure via the model's own temperature profile), not
+                        # just a coefficient-naming variant -- out of scope per
+                        # plan §3/R4 ("框架增强", not a per-model config fix).
+                        # Degrade to cloud=SKIPPED rather than crash the whole
+                        # build; this is one of the plan's anticipated
+                        # known-issues (§12 R4), not a bug to force through.
+                        vinfo = common.detect_vertical(formula_terms=formula_terms, override=override)
+                        a_eff, b_eff, p0_eff, coeffs_flipped = _read_hybrid_coeffs(
+                            nc0, vinfo, nlev_data=cl_b_frac.shape[0])
 
-                    def _to_target(field_frac, ps_2d_pa):
-                        # hybrid_to_plev_mass_conserving wants TOA->sfc order
-                        # for both the field and a_eff/b_eff. _read_hybrid_coeffs
-                        # already normalized the coefficients to that order and
-                        # reports whether a reversal was needed -- the field
-                        # (native file order, matching the coefficients' native
-                        # order) must be reversed the same way, or the profile
-                        # is silently scrambled (see _read_hybrid_coeffs docstring).
-                        field_toa2sfc = field_frac[::-1] if coeffs_flipped else field_frac
-                        proj_toa2sfc = common.hybrid_to_plev_mass_conserving(
-                            field_toa2sfc, a_eff, b_eff, p0_eff, ps_2d_pa, target_plev_pa_toa2sfc)
-                        return proj_toa2sfc[::-1]
+                        def _to_target(field_frac, ps_2d_pa):
+                            # hybrid_to_plev_mass_conserving wants TOA->sfc order
+                            # for both the field and a_eff/b_eff. _read_hybrid_coeffs
+                            # already normalized the coefficients to that order and
+                            # reports whether a reversal was needed -- the field
+                            # (native file order, matching the coefficients' native
+                            # order) must be reversed the same way, or the profile
+                            # is silently scrambled (see _read_hybrid_coeffs docstring).
+                            field_toa2sfc = field_frac[::-1] if coeffs_flipped else field_frac
+                            proj_toa2sfc = common.hybrid_to_plev_mass_conserving(
+                                field_toa2sfc, a_eff, b_eff, p0_eff, ps_2d_pa, target_plev_pa_toa2sfc)
+                            return proj_toa2sfc[::-1]
 
-                    base_state['camt'] = np.clip(_to_target(cl_b_frac, climo_ps_b), 0.0, 1.0)
-                    warm_state['camt'] = np.clip(_to_target(cl_w_frac, climo_ps_w), 0.0, 1.0)
-                    base_state['cliq'] = _to_target(climo_clw_b, climo_ps_b)
-                    warm_state['cliq'] = _to_target(climo_clw_w, climo_ps_w)
-                    base_state['cice'] = _to_target(climo_cli_b, climo_ps_b)
-                    warm_state['cice'] = _to_target(climo_cli_w, climo_ps_w)
-                else:
-                    plev_cl = np.array(nc0.variables['plev'][:], dtype=np.float64) if 'plev' in nc0.variables else plev_ta
-                    base_state['camt'] = np.clip(_maybe_interp(cl_b_frac, plev_cl, target_plev_pa_sfc2toa), 0.0, 1.0)
-                    warm_state['camt'] = np.clip(_maybe_interp(cl_w_frac, plev_cl, target_plev_pa_sfc2toa), 0.0, 1.0)
-                    base_state['cliq'] = _maybe_interp(climo_clw_b, plev_cl, target_plev_pa_sfc2toa)
-                    warm_state['cliq'] = _maybe_interp(climo_clw_w, plev_cl, target_plev_pa_sfc2toa)
-                    base_state['cice'] = _maybe_interp(climo_cli_b, plev_cl, target_plev_pa_sfc2toa)
-                    warm_state['cice'] = _maybe_interp(climo_cli_w, plev_cl, target_plev_pa_sfc2toa)
-            cloud_status = 'ACTIVE'
-            cloud_reason = cloud_reason or 'cl/clw/cli all present and not all-NaN'
-        else:
+                        base_state['camt'] = np.clip(_to_target(cl_b_frac, climo_ps_b), 0.0, 1.0)
+                        warm_state['camt'] = np.clip(_to_target(cl_w_frac, climo_ps_w), 0.0, 1.0)
+                        base_state['cliq'] = _to_target(climo_clw_b, climo_ps_b)
+                        warm_state['cliq'] = _to_target(climo_clw_w, climo_ps_w)
+                        base_state['cice'] = _to_target(climo_cli_b, climo_ps_b)
+                        warm_state['cice'] = _to_target(climo_cli_w, climo_ps_w)
+                    else:
+                        plev_cl = np.array(nc0.variables['plev'][:], dtype=np.float64) if 'plev' in nc0.variables else plev_ta
+                        base_state['camt'] = np.clip(_maybe_interp(cl_b_frac, plev_cl, target_plev_pa_sfc2toa), 0.0, 1.0)
+                        warm_state['camt'] = np.clip(_maybe_interp(cl_w_frac, plev_cl, target_plev_pa_sfc2toa), 0.0, 1.0)
+                        base_state['cliq'] = _maybe_interp(climo_clw_b, plev_cl, target_plev_pa_sfc2toa)
+                        warm_state['cliq'] = _maybe_interp(climo_clw_w, plev_cl, target_plev_pa_sfc2toa)
+                        base_state['cice'] = _maybe_interp(climo_cli_b, plev_cl, target_plev_pa_sfc2toa)
+                        warm_state['cice'] = _maybe_interp(climo_cli_w, plev_cl, target_plev_pa_sfc2toa)
+                cloud_status = 'ACTIVE'
+                cloud_reason = cloud_reason or 'cl/clw/cli all present and not all-NaN'
+            except ValueError as e:
+                cloud_ok = False
+                cloud_reason = 'cl/clw/cli present but vertical coordinate unsupported (known-issue, ' \
+                               'e.g. hybrid-height rather than hybrid-sigma-pressure): %s' % e
+
+        if not cloud_ok:
             base_state['camt'] = np.zeros(shape3d)
             warm_state['camt'] = np.zeros(shape3d)
             base_state['cliq'] = np.zeros(shape3d)
