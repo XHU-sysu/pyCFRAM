@@ -37,25 +37,15 @@ build-after hook -- because ``scripts/build_case_input.py``'s
 ``validate_states()`` rejects any non-finite value at write time
 (docs/plan_ph3.md §2.1).
 
-Known integration gap (not fixed here, out of this WP's file allowlist)
--------------------------------------------------------------------------
-``scripts/build_case_input.py`` triggers source registration via a hardcoded
-``import data.era5_source`` (line ~239) and ``run_case.py`` (~line 58)
-whitelists ``{era5_daily, era5_date_range, era5_merra2, None}`` for the
-build-dispatch that calls ``build_case_input.py``. Neither file imports this
-module or lists ``'cmip6_damip'`` in that whitelist yet, so
-``run_case.py <damip_case> --step build`` will currently print "No source
-block in case.yaml" and do nothing, even though
-``get_source(cfg)`` would resolve correctly once this module has been
-imported by *something*. This is exactly the gap ``docs/plan_ph3.md`` §2.3
-assigns to WP-M4.3 ("分发泛化 + 写盘器两处小改"), a separate/later work
-package that owns ``run_case.py`` and ``scripts/build_case_input.py`` in this
-phase's file-ownership map (§9.3) -- this module intentionally does not
-touch either file. Until WP-M4.3 lands, exercise this source directly via
-``from data.cmip6_damip_source import CMIP6DamipSource`` (see
-``tests/test_damip_source.py``) or via a one-line
-``import data.cmip6_damip_source`` before calling
-``data.source_base.get_source(cfg)``.
+Registration (resolved by WP-M4.3)
+-----------------------------------
+``scripts/build_case_input.py`` resolves the ``import`` needed to register
+this source via a ``SOURCE_MODULES`` dict keyed by ``source.type``
+(``'cmip6_damip' -> 'data.cmip6_damip_source'``), and ``run_case.py``'s build
+dispatch routes any non-``cesm2_cmip6``/non-``None`` source type through
+``build_case_input.py`` generically. ``run_case.py <damip_case> --step build``
+works end-to-end (verified against all 9 DAMIP cases in
+``cases/damip_*_histaer/``, docs/m4_damip_module.md).
 """
 import glob
 import json
@@ -493,9 +483,9 @@ class CMIP6DamipSource(DataSource):
                              '-- hist-aer freezes the solar constant so frc_solar==0 by construction')
         provenance['processes']['solar'] = {'status': solar_status, 'reason': solar_reason}
 
-        # ── huss (optional 2D; state key added even though the current
-        #    write_surf_nc (pre-WP-M4.3) does not yet emit it -- see module
-        #    docstring's "Known integration gap") ──
+        # ── huss (optional 2D; write_surf_nc's OPTIONAL_SURF_2D_VARS
+        #    (WP-M4.3) writes it when present, without affecting sources
+        #    like ERA5 that never set this key) ──
         if 'huss' in files:
             climo_huss_b, climo_huss_w, _, _, _ = _climo_pair_for_variable(
                 files['huss'], 'huss', base_years, warm_years)
@@ -759,9 +749,10 @@ class CMIP6DamipSource(DataSource):
     def _write_provenance(self):
         """Write provenance.json next to the case's input NCs.
 
-        scripts/build_case_input.py has no provenance-dump hook (a later
-        WP owns that file), so this writes directly -- see module
-        docstring's "Known integration gap".
+        scripts/build_case_input.py has no provenance-dump hook, so this
+        source writes it directly -- a deliberate choice (not a gap), since
+        provenance is DAMIP-source-specific and other sources (e.g. ERA5)
+        have no equivalent concept.
         """
         case_dir = self.cfg.get('_case_dir')
         if not case_dir:
