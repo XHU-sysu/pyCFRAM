@@ -1,0 +1,13 @@
+# DAMIP model quirks: CanESM5 (docs/plan_ph3.md §4.2, §1.4)
+#
+# Missing cl/clw/cli AND o3 -- the M5 "cloud skip" demonstrator alongside
+# CESM2 (deliberately kept in M5 rather than M4 to avoid two skip samples
+# in the smaller M4 set, per plan §1.4).
+institution_id: CCCma
+default_variant: r1i1p1f1   # model also publishes p2 variants; f1 is default
+default_grid: gn
+calendar: 365_day
+warm_years_default: [2011, 2020]
+missing_ok: [cl, clw, cli, o3]   # declarative: these gaps are expected/OK
+vertical:
+  scheme: auto   # irrelevant in practice (no cloud data), kept for consistency

@@ -1,0 +1,14 @@
+# DAMIP model quirks: CNRM-CM6-1 (docs/plan_ph3.md §4.2, §1.4)
+#
+# Full-variable model (14/14 vars incl. o3) -- M5's f2-variant + gr-grid
+# heterogeneity coverage sample (M4 used f1 exclusively).
+institution_id: CNRM-CERFACS
+default_variant: r1i1p1f2   # NOT f1 -- CNRM-CM6-1 hist-aer publishes as f2
+default_grid: gr
+calendar: gregorian
+warm_years_default: [2011, 2020]
+vertical:
+  scheme: auto   # NOT yet confirmed against real data -- verify formula_terms
+                 # once downloaded; IPSL needed an explicit override despite
+                 # being predicted "auto-friendly" too (docs/plan_ph3.md
+                 # session log, WP-M4.5), so don't assume this holds.

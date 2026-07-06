@@ -1,0 +1,16 @@
+# DAMIP model quirks: HadGEM3-GC31-LL (docs/plan_ph3.md §4.2, §1.4)
+#
+# Missing o3 only (cloud/rsdt present) -- but f3 variant + 360_day calendar
+# double-stress-test: this is the plan's deliberate calendar+variant edge
+# case (only 360_day model in the M5 set).
+institution_id: MOHC
+default_variant: r1i1p1f3   # NOT f1 -- HadGEM3-GC31-LL hist-aer publishes as f3
+default_grid: gn
+calendar: 360_day
+warm_years_default: [2011, 2020]
+vertical:
+  scheme: auto   # NOT yet confirmed against real data -- verify formula_terms
+                 # once downloaded (see CNRM-CM6-1.yaml note). If vertical
+                 # coordinate turns out to be hybrid-HEIGHT (not
+                 # hybrid-sigma-pressure) this becomes a known-issue per
+                 # plan §3/R4, not a bug to force-fit.
