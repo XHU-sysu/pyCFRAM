@@ -79,7 +79,7 @@ def search_datasets(
                         did = doc['id']
                         if did not in all_datasets:
                             all_datasets[did] = doc
-            except urllib.error.URLError as e:
+            except (urllib.error.URLError, OSError) as e:
                 raise RuntimeError(f"ESGF search failed ({node}): {e}")
         return list(all_datasets.values())
     else:
@@ -89,7 +89,7 @@ def search_datasets(
             with urllib.request.urlopen(url, timeout=30) as response:
                 data = json.loads(response.read())
                 return data.get('response', {}).get('docs', [])
-        except urllib.error.URLError as e:
+        except (urllib.error.URLError, OSError) as e:
             raise RuntimeError(f"ESGF search failed ({node}): {e}")
 
 
@@ -172,7 +172,7 @@ def list_files(
                         'checksum_type': checksum_type,
                     })
             return files
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, OSError) as e:
         raise RuntimeError(f"ESGF file list failed ({node}): {e}")
 
 
@@ -294,7 +294,7 @@ def fetch(
             pass
         else:
             raise RuntimeError(f"Download failed ({url}): {e}")
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, OSError) as e:
         raise RuntimeError(f"Download failed ({url}): {e}")
 
     # Verify checksum if provided

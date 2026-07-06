@@ -167,6 +167,19 @@ def test_search_datasets_url_error_raises_runtimeerror_with_variables(monkeypatc
         esgf.search_datasets('M', 'E', variables=['ta'])
 
 
+def test_search_datasets_remote_disconnected_raises_runtimeerror_not_uncaught(monkeypatch):
+    """See test_list_files_remote_disconnected_... docstring -- same real
+    failure mode (NorESM2-LM download), same fix, different call site."""
+    import http.client
+
+    def fake_urlopen(url, timeout=30):
+        raise http.client.RemoteDisconnected('Remote end closed connection without response')
+
+    monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
+    with pytest.raises(RuntimeError, match='ESGF search failed'):
+        esgf.search_datasets('M', 'E', variables=['ta'])
+
+
 # ---------------------------------------------------------------------------
 # list_files -- HTTPServer URL extraction out of the pipe-separated field
 # ---------------------------------------------------------------------------
@@ -241,6 +254,23 @@ def test_list_files_no_http_url_at_all_is_dropped(monkeypatch):
 def test_list_files_url_error_raises_runtimeerror(monkeypatch):
     def fake_urlopen(url, timeout=30):
         raise urllib.error.URLError('down')
+
+    monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
+    with pytest.raises(RuntimeError, match='ESGF file list failed'):
+        esgf.list_files('ds1')
+
+
+def test_list_files_remote_disconnected_raises_runtimeerror_not_uncaught(monkeypatch):
+    """Regression test for a real failure hit downloading NorESM2-LM (WP-M5.3
+    prep): http.client.RemoteDisconnected is NOT a urllib.error.URLError
+    subclass (it's a ConnectionResetError/OSError raised directly by
+    http.client during response.begin(), which urlopen() doesn't always wrap)
+    -- it propagated uncaught and crashed the whole download script instead
+    of being reported as a normal per-file/per-search RuntimeError."""
+    import http.client
+
+    def fake_urlopen(url, timeout=30):
+        raise http.client.RemoteDisconnected('Remote end closed connection without response')
 
     monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
     with pytest.raises(RuntimeError, match='ESGF file list failed'):
