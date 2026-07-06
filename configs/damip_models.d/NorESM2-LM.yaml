@@ -1,0 +1,15 @@
+# DAMIP model quirks: NorESM2-LM (docs/plan_ph3.md §4.2, §1.4)
+#
+# WP-M5.3 custom-source-accession example: a model NOT in the M4/M5
+# 8-model set, added purely via this yaml + a case.yaml (no core/fortran
+# changes, no data/scripts changes). Missing cl/clw/cli/rsdt/o3 -- another
+# "skip full house" demonstrator like CESM2/CanESM5, verified against real
+# downloaded data (2026-07-06).
+institution_id: NCC
+default_variant: r1i1p1f1
+default_grid: gn
+calendar: noleap
+warm_years_default: [2011, 2020]
+missing_ok: [cl, clw, cli, rsdt, o3]
+vertical:
+  scheme: auto   # irrelevant in practice (no cloud data published)

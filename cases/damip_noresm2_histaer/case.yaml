@@ -1,0 +1,44 @@
+# DAMIP custom-source-accession example (WP-M5.3): NorESM2-LM hist-aer,
+# real ESGF data. This model is NOT one of the plan's 8 M4/M5 models --
+# it demonstrates that adding a brand-new DAMIP model requires ONLY this
+# file + configs/damip_models.d/NorESM2-LM.yaml, no changes to core/,
+# fortran/, or any Python module.
+case_name: DAMIP_NorESM2_histaer
+description: "NorESM2-LM hist-aer, first decade (1850-1859) vs last decade (2011-2020) climatology (custom-source-accession example, WP-M5.3)"
+
+source:
+  type: cmip6_damip
+  model: NorESM2-LM
+  experiment: hist-aer
+  variant: r1i1p1f1
+  grid_label: gn
+  raw_dir: raw_data/cmip6_damip/NorESM2-LM/hist-aer
+  base_years: [1850, 1859]
+  warm_years: [2011, 2020]
+  co2:
+    source: constant
+    base_ppmv: 284.7
+    perturbed_ppmv: 284.7
+  o3: auto
+  aerosol:
+    source: zero
+
+grid:
+  pressure_levels: [1, 5, 10, 20, 30, 50, 70, 100, 150, 200, 250, 300,
+                    400, 500, 600, 700, 850, 925, 1000]
+
+input:
+  base_pres: input/base_pres.nc
+  base_surf: input/base_surf.nc
+  perturbed_pres: input/perturbed_pres.nc
+  perturbed_surf: input/perturbed_surf.nc
+  nonrad_forcing: input/nonrad_forcing.nc
+
+radiation:
+  scheme: rrtmg
+
+run:
+  nproc: auto
+
+plot:
+  key_region: {lon: [0, 360], lat: [-90, 90]}
