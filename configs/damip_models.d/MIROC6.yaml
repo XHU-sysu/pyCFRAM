@@ -1,0 +1,12 @@
+# DAMIP model quirks: MIROC6 (docs/plan_ph3.md §4.2, §1.4)
+#
+# Missing o3 only (cloud/rsdt present) -- o3 resolves to CLIMATOLOGY
+# injection via o3=auto.
+institution_id: MIROC
+default_variant: r1i1p1f1
+default_grid: gn
+calendar: gregorian
+warm_years_default: [2011, 2020]
+vertical:
+  scheme: auto   # NOT yet confirmed against real data -- verify formula_terms
+                 # once downloaded (see CNRM-CM6-1.yaml note).

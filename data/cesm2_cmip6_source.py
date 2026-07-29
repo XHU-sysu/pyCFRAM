@@ -16,11 +16,35 @@ Convention (output, pyCFRAM input)
 ----------------------------------
 NetCDF stores arrays in **surface→TOA** lev order (same as CMIP6 plev). pyCFRAM
 applies `[::-1]` internally to flip to TOA→sfc for Fortran processing.
+
+Phase 3 refactor (docs/plan_ph3.md §2.2/§4, WP-M4.1)
+-----------------------------------------------------
+This module is now a **thin CESM2-specific shim** over the model-agnostic
+machinery in `data/cmip6_common.py`: calendar handling (noleap), hybrid
+coefficient naming (`a,b,p0`), and the mass-conserving hybrid→plev /
+albedo numerical kernels are delegated there. This file only supplies the
+CESM2-specific defaults (calendar, time units, filename layout, variable
+list) that a future `data/cmip6_damip_source.py` (WP-M4.2) will supply
+differently per model.
+
+**Regression-safety contract**: `load_climo_pres`, `hybrid_to_plev_mass_conserving`,
+and `compute_albedo` — the three functions `scripts/build_cesm2_official.py`
+imports — must produce numerically identical output to the pre-refactor
+version of this file. This is enforced by `tests/test_damip_regression.py`
+(the "回归金标" gate, docs/plan_ph3.md §8 WP-M4.1) against a synthetic mini
+CESM2-style fixture in `tests/data/damip_smoke/cesm2_mini/`. The real
+CESM2 raw data only lives on hqlx210 (see persistent_context.md); a
+matching full-scale check (rerun `cesm2_4xco2_official --step build`, diff
+NC output) must be performed separately by whoever has remote access — see
+that test file's module docstring.
 """
 import os
 import glob
 import numpy as np
 from netCDF4 import Dataset
+
+from data import cmip6_common as common
+from data.cmip6_common import hybrid_to_plev_mass_conserving, compute_albedo  # re-export, moved as-is
 
 
 # CMIP6 plev (surface→TOA in NetCDF) for ta/hus — fixed
@@ -30,6 +54,12 @@ PLEV19_PA = np.array([100000, 92500, 85000, 70000, 60000, 50000, 40000,
 
 # pyCFRAM TOA→sfc convention (reverse of CMIP6 NetCDF order, in hPa)
 PLEV19_HPA_TOP_DOWN = (PLEV19_PA[::-1] / 100.0).copy()  # [1, 5, ..., 925, 1000]
+
+# CESM2-specific calendar/time defaults (used only as a fallback if a raw
+# file is missing the `units`/`calendar` attributes — real CESM2 CMIP6
+# output always carries both).
+CESM2_CALENDAR = 'noleap'
+CESM2_TIME_UNITS = 'days since 0001-01-01'
 
 
 def list_files(raw_dir, exp_subdir):
@@ -44,57 +74,49 @@ def list_files(raw_dir, exp_subdir):
 
 
 def years_to_month_indices(time_var, year_start, year_end):
-    """Return slice over months whose YEAR (per noleap calendar) is in
-    [year_start, year_end] inclusive.
+    """Return indices of months whose YEAR is in [year_start, year_end]
+    inclusive.
 
-    CESM2 noleap time stored in days since 0001-01-01. 365 days/year exactly.
-    Month index: floor(time / 365 * 12) gives integer year offset directly.
+    Delegates to `cmip6_common.decode_time` (calendar-aware via cftime),
+    using the time variable's own `units`/`calendar` NetCDF attributes if
+    present, else CESM2's noleap/'days since 0001-01-01' defaults (real
+    CESM2 CMIP6 raw output always carries both attributes, so the fallback
+    only matters for hand-built test fixtures). Replaces the pre-Phase-3
+    noleap-only `days/365.0` arithmetic (moved to
+    `data/cmip6_common.decode_time` and generalized to any calendar).
     """
-    days = np.asarray(time_var[:], dtype=np.float64)
-    # noleap: each year is exactly 365 days. time stored at month midpoint.
-    # We can recover (year, month) approx via days / 365.0 → year fraction.
-    year_frac = days / 365.0
-    year_int = year_frac.astype(int) + 1   # +1 because CMIP6 year origin is yr 0001
-    # NB: year_int = 1 corresponds to days 0..364
-    # Standard CESM convention: time is mid-month → year = floor(days/365)+1
-    mask = (year_int >= year_start) & (year_int <= year_end)
-    return np.where(mask)[0]
+    units = getattr(time_var, 'units', CESM2_TIME_UNITS)
+    calendar = getattr(time_var, 'calendar', CESM2_CALENDAR)
+    years, _months, _day_weights = common.decode_time(
+        np.asarray(time_var[:]), units, calendar)
+    return common.years_to_month_indices(years, year_start, year_end)
 
 
-def annual_climo_from_monthly(field, time_indices):
-    """field shape (time, ...) → annual climo, day-weighted.
+def _day_weights_for(time_var, time_indices):
+    """CESM2 shim helper: decode the full time axis, return day_weights
+    selected at `time_indices` (aligned 1:1, as required by
+    `cmip6_common.annual_climo_from_monthly`)."""
+    units = getattr(time_var, 'units', CESM2_TIME_UNITS)
+    calendar = getattr(time_var, 'calendar', CESM2_CALENDAR)
+    _years, _months, day_weights = common.decode_time(
+        np.asarray(time_var[:]), units, calendar)
+    return day_weights[time_indices]
 
-    NOTE: CMIP6 plev19 data has fillvalue (~1e20) for cells at pressure
-    levels below local surface (e.g., 1000 hPa over high orography). Some
-    grid points have valid data in some months and fillvalue in others
-    (seasonal ps variation). A simple weighted mean would produce polluted
-    values like 8e16 (fillvalue × month_fraction).
 
-    Fix: convert fillvalues to NaN first, then per-cell day-weighted mean
-    over **only valid months**. Cells with no valid data in any month
-    remain NaN (handled later by mask_subsurface_layers.py).
+def annual_climo_from_monthly(field, time_indices, time_var=None, day_weights=None):
+    """CESM2 shim: day-weighted annual climatology, delegating the numerics
+    to `cmip6_common.annual_climo_from_monthly`.
+
+    Callers may pass either `time_var` (the netCDF4 time Variable, from
+    which day_weights are derived via whichever `calendar` attribute it
+    carries — noleap for real CESM2) or precomputed `day_weights` (already
+    aligned to `time_indices`) directly.
     """
-    NOLEAP_DAYS = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31],
-                           dtype=np.float64)
-    n = len(time_indices)
-    if n == 0:
-        raise ValueError('No time records selected')
-
-    sub = np.asarray(field[time_indices], dtype=np.float64)
-    # Mask fillvalues (CMIP6 typical 1e20; covers anything > 1e15 safely)
-    sub = np.where(np.abs(sub) > 1e15, np.nan, sub)
-
-    months = (time_indices % 12)
-    w = NOLEAP_DAYS[months]
-    w_b = w.reshape((n,) + (1,) * (sub.ndim - 1))   # broadcast shape
-
-    # Per-cell weighted mean ignoring NaN: sum(w*v where valid) / sum(w where valid)
-    valid = ~np.isnan(sub)
-    num = np.nansum(np.where(valid, w_b * sub, 0.0), axis=0)
-    den = np.sum(np.where(valid, w_b, 0.0), axis=0)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        out = np.where(den > 0, num / den, np.nan)
-    return out
+    if day_weights is None:
+        if time_var is None:
+            raise ValueError('annual_climo_from_monthly requires time_var or day_weights')
+        day_weights = _day_weights_for(time_var, time_indices)
+    return common.annual_climo_from_monthly(field, time_indices, day_weights)
 
 
 def load_climo_pres(raw_dir, exp_subdir, year_start, year_end):
@@ -109,7 +131,9 @@ def load_climo_pres(raw_dir, exp_subdir, year_start, year_end):
 
     # Time indices come from any variable (all aligned)
     f = Dataset(files['ta'])
-    idx = years_to_month_indices(f.variables['time'], year_start, year_end)
+    time_var = f.variables['time']
+    idx = years_to_month_indices(time_var, year_start, year_end)
+    day_weights = _day_weights_for(time_var, idx)
     print('  selected %d months' % len(idx))
     lat = np.array(f.variables['lat'][:])
     lon = np.array(f.variables['lon'][:])
@@ -121,7 +145,7 @@ def load_climo_pres(raw_dir, exp_subdir, year_start, year_end):
     # Variables on plev grid (ta, hus): shape (nlev_plev=19, nlat, nlon)
     for var in ('ta', 'hus'):
         f = Dataset(files[var])
-        out[var] = annual_climo_from_monthly(f.variables[var], idx)
+        out[var] = common.annual_climo_from_monthly(f.variables[var], idx, day_weights)
         f.close()
 
     # Variables on hybrid grid (cl, clw, cli): shape (nlev_hyb=32, nlat, nlon)
@@ -129,15 +153,15 @@ def load_climo_pres(raw_dir, exp_subdir, year_start, year_end):
     out['hybrid_a'] = np.array(f.variables['a'][:], dtype=np.float64)
     out['hybrid_b'] = np.array(f.variables['b'][:], dtype=np.float64)
     out['hybrid_p0'] = float(f.variables['p0'][...])
-    out['cl'] = annual_climo_from_monthly(f.variables['cl'], idx) / 100.0  # %→fraction
+    out['cl'] = common.annual_climo_from_monthly(f.variables['cl'], idx, day_weights) / 100.0  # %→fraction
     f.close()
 
     f = Dataset(files['clw'])
-    out['clw'] = annual_climo_from_monthly(f.variables['clw'], idx)
+    out['clw'] = common.annual_climo_from_monthly(f.variables['clw'], idx, day_weights)
     f.close()
 
     f = Dataset(files['cli'])
-    out['cli'] = annual_climo_from_monthly(f.variables['cli'], idx)
+    out['cli'] = common.annual_climo_from_monthly(f.variables['cli'], idx, day_weights)
     f.close()
 
     # 2D surface fields. huss = 2m specific humidity (CMIP6 standard, kg/kg);
@@ -145,7 +169,7 @@ def load_climo_pres(raw_dir, exp_subdir, year_start, year_end):
     # GW-base.f L322-330 reads huss_base.dat for the surface row of /atmosp/.
     for var in ('ts', 'ps', 'rsdt', 'rsds', 'rsus', 'hfls', 'hfss', 'huss'):
         f = Dataset(files[var])
-        out[var] = annual_climo_from_monthly(f.variables[var], idx)
+        out[var] = common.annual_climo_from_monthly(f.variables[var], idx, day_weights)
         f.close()
 
     return out
@@ -167,6 +191,11 @@ def hybrid_to_plev(field_hyb, a, b, p0, ps_2d, plev_target_pa):
 
     Method: log-p linear interpolation per column. Above hybrid TOA: 0.
     Below hybrid bottom: extend bottom value to surface.
+
+    NOTE: superseded by `hybrid_to_plev_mass_conserving` (now in
+    `data/cmip6_common.py`) for actual case builds — kept here unmodified,
+    untouched by the Phase 3 refactor, as a reference/diagnostic
+    implementation (see scripts/diag_cloud_column.py).
     """
     nlev_hyb, nlat, nlon = field_hyb.shape
     nlev_target = len(plev_target_pa)
@@ -191,87 +220,6 @@ def hybrid_to_plev(field_hyb, a, b, p0, ps_2d, plev_target_pa):
             out[:, j, i] = interp_vals
 
     return out
-
-
-def hybrid_to_plev_mass_conserving(field_hyb, a, b, p0, ps_2d, plev_target_pa):
-    """Mass-conserving re-projection of mixing ratio from hybrid to plev.
-
-    Builds cumulative mass M(p) = ∫_0^p f * dp on the hybrid grid (trapezoidal),
-    interpolates M at target plev boundaries, and differences to extract
-    layer-mean mixing ratios. By construction, ∑(target_field·Δp_target)
-    over a column equals ∑(hybrid_field·Δp_hybrid) — total cloud mass conserved.
-
-    Replaces the lossy single-point log-linear sampling in `hybrid_to_plev`,
-    which was found (via scripts/diag_cloud_column.py) to lose ~5.5% of
-    column-integrated liquid water on average, with up to 24% loss in
-    boundary-layer cloud regions. Use this for cl, clw, cli; hus/ta are
-    already on plev directly from CMIP6 CMOR and don't need re-projection.
-
-    Args:
-        field_hyb: (nlev_hyb, nlat, nlon) mixing ratio on hybrid (TOA→sfc)
-        a, b: hybrid coefficients (TOA→sfc)
-        p0: reference pressure (Pa)
-        ps_2d: (nlat, nlon) surface pressure (Pa)
-        plev_target_pa: target plev (Pa), TOA→sfc ordering (ascending)
-
-    Returns:
-        field_plev: (nlev_target, nlat, nlon) layer-mean mixing ratio,
-                    TOA→sfc ordering. The value at index k represents the
-                    mass-mean mixing ratio for the layer between
-                    plev_target[k] (top, smaller p) and plev_target[k+1]
-                    (bottom, larger p). For the LAST index, the layer is
-                    between plev_target[-2] and ps (capped).
-    """
-    nlev_hyb = len(a)
-    nlev_t = len(plev_target_pa)
-    nlat, nlon = ps_2d.shape
-
-    out = np.zeros((nlev_t, nlat, nlon), dtype=np.float64)
-
-    for j in range(nlat):
-        for i in range(nlon):
-            ps = ps_2d[j, i]
-            p_h = a * p0 + b * ps              # (nlev_hyb,) TOA→sfc, ascending
-            f_h = field_hyb[:, j, i]
-            f_h = np.where(np.isnan(f_h), 0.0, f_h)
-
-            # Cumulative mass from TOA via trapezoidal. Anchors: M(p=0)=0,
-            # M(p=ps) = M(p_h[-1]) + f_h[-1] * (ps - p_h[-1]).
-            M_hyb = np.zeros(nlev_hyb)
-            for kh in range(1, nlev_hyb):
-                dp = p_h[kh] - p_h[kh-1]
-                f_avg = 0.5 * (f_h[kh] + f_h[kh-1])
-                M_hyb[kh] = M_hyb[kh-1] + f_avg * dp
-            M_at_ps = M_hyb[-1] + f_h[-1] * (ps - p_h[-1])
-
-            p_anchor = np.concatenate([[0.0], p_h, [ps]])
-            M_anchor = np.concatenate([[0.0], M_hyb, [M_at_ps]])
-
-            # Target layer k is between plev_target[k] (top) and plev_target[k+1]
-            # (bottom). Last index: layer between plev_target[-1] and ps.
-            for kt in range(nlev_t):
-                p_top = plev_target_pa[kt]
-                if kt < nlev_t - 1:
-                    p_bot_nominal = plev_target_pa[kt + 1]
-                else:
-                    p_bot_nominal = ps    # last index: integrate to surface
-                p_bot = min(p_bot_nominal, ps)
-                if p_bot <= p_top:
-                    out[kt, j, i] = 0.0   # subsurface or zero-thickness
-                    continue
-                M_top = np.interp(p_top, p_anchor, M_anchor)
-                M_bot = np.interp(p_bot, p_anchor, M_anchor)
-                out[kt, j, i] = (M_bot - M_top) / (p_bot - p_top)
-
-    return out
-
-
-def compute_albedo(rsus, rsds):
-    """Surface albedo = rsus / rsds, clipped [0, 1]. Where rsds≈0 (polar
-    night), set albedo=0 (no SW input → albedo undefined, doesn't matter)."""
-    with np.errstate(divide='ignore', invalid='ignore'):
-        alb = np.where(rsds > 1.0, rsus / rsds, 0.0)
-    return np.clip(alb, 0.0, 1.0)
 
 
 def reorder_for_pycfram_input(arr_top_down):

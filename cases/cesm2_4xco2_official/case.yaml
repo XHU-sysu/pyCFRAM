@@ -29,6 +29,12 @@ input:
 radiation:
   scheme: rrtmg               # default RRTMG (handles any nlev via plev.dat)
 
+lapse_rate:
+  kernels: [CloudSat, GFDL]     # CloudSat=Kramer(主), GFDL=参考
+  kernel_months: annual         # 12-month kernel mean (matches ClimKern tile-12 path)
+  sky: all-sky
+  tropopause: climkern          # make_tropo formula: 3e4 - 2e4*cos(lat) Pa
+
 run:
   nproc: auto
 

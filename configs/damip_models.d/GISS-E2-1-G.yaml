@@ -1,0 +1,12 @@
+# DAMIP model quirks: GISS-E2-1-G (docs/plan_ph3.md §4.2, §1.4)
+#
+# Missing o3 only (cloud/rsdt present); hist-aer data ends 2014-12 like
+# CESM2 -- warm_years shifted a decade earlier. 365_day calendar.
+institution_id: NASA-GISS
+default_variant: r1i1p1f1   # model also publishes p3 variants; f1 is default
+default_grid: gn
+calendar: 365_day
+warm_years_default: [2005, 2014]   # hist-aer data ends 2014-12 (plan §1.4)
+vertical:
+  scheme: auto   # NOT yet confirmed against real data -- verify formula_terms
+                 # once downloaded (see CNRM-CM6-1.yaml note).

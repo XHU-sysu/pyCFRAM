@@ -340,3 +340,98 @@ Production runs happen on the `hqlx*` cluster:
 Checked-in compiled binaries are **not** committed; a fresh clone on any
 system runs `cd fortran && make` (intel by default, `TOOLCHAIN=gnu` on Mac
 or any gfortran-only host).
+
+---
+
+## 12. Phase 2: radiative-kernel lapse-rate module
+
+An independent, second opinion on CFRAM's temperature decomposition: the
+conventional radiative-kernel method, reimplemented natively so it can be
+run side by side with the CFRAM result on the same case. Full write-up in
+[`docs/m2_kernel_module.md`](m2_kernel_module.md); the method-vs-method
+comparison and per-process attribution are in
+[`docs/m3_methodology_comparison.md`](m3_methodology_comparison.md).
+
+- **What it computes.** `core/lr_kernel.py` splits the TOA LW response to a
+  temperature change into a Planck part (vertically uniform warming at the
+  surface value) and a lapse-rate part (the departure from uniform):
+  `ΔR_LR = Σ_k K_lw(k)·(ΔT(k) − ΔTS)·dp(k)/1e4`. The tropopause is the
+  standard diagnostic `3e4 − 2e4·cos(lat)` Pa, and layer thicknesses are
+  clipped to `[tropopause, ps]` so below-ground and stratospheric layers
+  drop out of the sum with `dp = 0` rather than needing a separate mask.
+- **No xesmf/ESMF dependency.** `core/kernels.py` reads ClimKern-format
+  kernel files and regrids them with a self-contained scipy bilinear
+  interpolator (periodic in longitude, clip-to-boundary in latitude),
+  cross-validated to `corr > 0.999` against xesmf. This matters
+  operationally: the module runs on any host with numpy/scipy/netCDF4,
+  while the ESMF stack only exists in the separate `pycfram-kern` env used
+  for the cross-check script.
+- **Validated against ClimKern.** Fed the same `dT_observed`, the native
+  implementation reproduces ClimKern's `calc_T_feedbacks` on
+  `cesm2_4xco2_official` at corr 0.9997 / 1.32% domain-mean relative
+  difference (CloudSat–Kramer kernel) and 0.9999 / 0.02% (GFDL) — against
+  a contract gate of 0.85 / 15%.
+- **Per-process attribution (M3).** `core/lr_attribution.py` pushes each
+  CFRAM process term (`dT_q`, `dT_atmdyn`, …) through the same kernel to
+  ask how much of the lapse-rate feedback each process is responsible for.
+  Additivity residual is ~22–23% of the mean |total| — the expected
+  first-order-expansion non-linearity, the same order as the aerosol and
+  cloud additivity residuals documented elsewhere, not a defect.
+- **The trap worth repeating.** netCDF4 returns masked arrays;
+  `np.array(masked)` silently substitutes the raw fill value (~1e36) for
+  masked points instead of NaN, which made ΔR_LR blow up to 1e40 before it
+  was caught. Every read in this module goes through
+  `np.ma.filled(arr, np.nan)`. The same class of bug is why
+  `data/cmip6_common.py` converts `|value| > 1e15` to NaN on ingest.
+
+Entry points: `scripts/compute_lr_kernel.py` (native ΔR_LR/ΔR_PL),
+`scripts/validate_lr_vs_climkern.py` (cross-check, needs `pycfram-kern`),
+`scripts/compute_lr_attribution.py` (M3), `scripts/plot_lr_comparison.py`.
+Kernel NetCDFs are staged by `data/kernel_source.py` and are gitignored.
+
+---
+
+## 13. Phase 3: DAMIP multi-model data source
+
+A registered data source (`data/cmip6_damip_source.py`, `@register_source
+('cmip6_damip')`) lets pyCFRAM ingest any CMIP6 DAMIP single-forcing
+experiment (`hist-aer`, `hist-GHG`, ...) from any contributing model,
+without touching `core/` or `fortran/` — same generic writer
+(`scripts/build_case_input.py`) and same Fortran engine as ERA5/CESM2. Full
+architecture, IO contract, and worked bug-fix examples are in
+[`docs/m4_damip_module.md`](m4_damip_module.md); per-model support matrix
+and known-issues are in
+[`docs/m5_multimodel_userguide.md`](m5_multimodel_userguide.md). Short
+version, since the Chinese technical notes carry the exhaustive account:
+
+- **Model-agnostic numerics** live in `data/cmip6_common.py`: calendar-aware
+  time decoding (`cftime`, correct for noleap/365_day/360_day/gregorian/
+  proleptic_gregorian — the naive `days/365.0` arithmetic used before this
+  module is silently wrong for anything but noleap), hybrid-sigma-pressure
+  coefficient-naming detection (`p = a·p0 + b·ps` vs `p = ap + b·ps`),
+  log-pressure plev re-interpolation, bilinear horizontal regrid (needed
+  when a variable is published on a coarser native grid than its own
+  model's siblings — confirmed for MRI-ESM2-0's `o3`), and an analytic TOA
+  insolation fallback for the ~40% of candidate models that don't publish
+  `rsdt`.
+- **Per-model quirks** are pure YAML (`configs/damip_models.d/<model>.yaml`)
+  — default variant/grid, calendar, and an explicit hybrid-coefficient
+  override for models whose `formula_terms` CF attribute is missing (IPSL)
+  or non-standard (CNRM's `formula_term`, singular). Adding a model that
+  fits the standard cases needs **zero Python changes** — see
+  `docs/m5_multimodel_userguide.md`'s NorESM2-LM worked example.
+- **Missing cloud/O₃/`rsdt` is the norm, not the exception**: of 13
+  candidate hist-aer models surveyed, only 3 publish all needed variables.
+  A documented decision tree (build-time, not a post-hoc hook — the
+  writer's `validate_states()` rejects non-finite values before any file
+  is written) resolves each gap to a physically inert fallback (e.g.
+  injected O₃ climatology with `frc_o3 ≡ 0` by construction) and records
+  the choice in `provenance.json`, surfaced in a human-readable
+  `*.summary.txt` after every run.
+- **ESGF acquisition** (`data/esgf_fetch.py` + `scripts/download_damip.py`)
+  is pure stdlib `urllib` — no `requests`/`intake-esgf` — and downloads
+  without authentication (DKRZ/CEDA Solr search + HTTP Range requests).
+- Coverage of the three new modules: 96–99% (`coverage run -m pytest
+  tests/ -q && coverage report -m --include="*/data/cmip6_common.py,
+  */data/cmip6_damip_source.py,*/data/esgf_fetch.py"`), well above the
+  60% contract gate.

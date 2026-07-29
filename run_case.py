@@ -32,7 +32,7 @@ def run_step(script, args_list):
 def main():
     parser = argparse.ArgumentParser(description='pyCFRAM: run CFRAM decomposition')
     parser.add_argument('case', help='Case name (directory under cases/)')
-    parser.add_argument('--step', choices=['build', 'run', 'plot', 'all'],
+    parser.add_argument('--step', choices=['build', 'run', 'plot', 'lr', 'lr-attr', 'all'],
                         default='all', help='Which step to run (default: all)')
     parser.add_argument('--nproc', type=int, default=None,
                         help='Number of parallel workers (default: from config or all CPUs)')
@@ -49,15 +49,27 @@ def main():
     steps = ['build', 'run', 'plot'] if args.step == 'all' else [args.step]
 
     if 'build' in steps:
-        # Dispatch on source.type: ERA5 reanalysis → build_case_input.py;
-        # cesm2_cmip6 → build_cesm2_official.py; absent → skip (input pre-supplied).
+        # Dispatch on source.type:
+        #   - cesm2_cmip6 → the bespoke path-B build sequence (build_cesm2_official.py
+        #     + inject_cesm_o3.py + mask_subsurface_layers.py). Kept as an explicit
+        #     branch, untouched, because those three scripts are not registered
+        #     DataSource plugins and must stay on their own build-after-hook flow
+        #     (docs/plan_ph3.md §2.1/§2.4).
+        #   - any other source.type (ERA5 variants, cmip6_damip, and any future
+        #     registered plugin) → the generic writer build_case_input.py (path A).
+        #     build_case_input.py itself resolves and imports the right plugin
+        #     module and will raise a clear "Unknown source type" error if the
+        #     type was never registered — run_case.py does not need to know the
+        #     registry to dispatch here.
+        #   - source.type unset/None → input is pre-supplied, skip build (unchanged
+        #     behavior).
         src_type = cfg.get('source', {}).get('type')
         if src_type == 'cesm2_cmip6':
             run_step('build_cesm2_official.py', ['--case', args.case])
             # Post-build: O3 inject + subsurface mask
             run_step('inject_cesm_o3.py',           ['--case', args.case])
             run_step('mask_subsurface_layers.py',   ['--case', args.case])
-        elif src_type in ('era5_daily', 'era5_date_range', 'era5_merra2', None) and 'source' in cfg:
+        elif src_type is not None:
             run_step('build_case_input.py', ['--case', args.case])
         else:
             print('No source block in case.yaml — skipping build step (input must be pre-supplied)')
@@ -70,9 +82,19 @@ def main():
                 print("Run: python3 scripts/build_case_input.py --case %s" % args.case)
                 sys.exit(1)
         run_step('run_parallel_python.py', ['--case', args.case, '--nproc', str(nproc)])
+        # Post-run summary (docs/plan_ph3.md §6.3, WP-M4.4): independent
+        # post-processing script, not coupled into run_parallel_python.py
+        # itself. Only invoked here (run step), never for build/plot.
+        run_step('write_run_summary.py', ['--case', args.case])
 
     if 'plot' in steps:
         run_step('plot_fig3_independent.py', [args.case])
+
+    if 'lr' in steps:
+        run_step('compute_lr_kernel.py', [args.case])
+
+    if 'lr-attr' in steps:
+        run_step('compute_lr_attribution.py', [args.case])
 
     print("\n" + "=" * 60)
     print("Done! Results in: cases/%s/output/ and cases/%s/figures/" % (args.case, args.case))

@@ -1,0 +1,43 @@
+# DAMIP experiment_id semantics (docs/plan_ph3.md §4.3, §1.1)
+#
+# Consumed by data/cmip6_damip_source.py purely for the §5.2 single-forcing
+# "sanity check" warnings (CO2/O3 expected-equal-or-different across base vs
+# warm states) -- it is NOT the source of truth for CO2/O3 values themselves,
+# those always come from a case.yaml `source:` block (co2.base_ppmv/
+# perturbed_ppmv, o3: auto|use_model|climatology|skip). Missing an experiment
+# here is not fatal: cmip6_damip_source.py falls back to "no sanity check,
+# just a warning" (docs/plan_ph3.md §4.2's graceful-degradation principle
+# applied consistently to experiments as well as models).
+#
+# `net_cooling: true` marks an experiment whose single forcing is expected to
+# produce a net global surface cooling with a Northern-Hemisphere-weighted
+# signal. scripts/write_run_summary.py judges the M4 physical-sanity gates
+# (docs/plan_ph3.md §8) only for such experiments; for the others the same
+# numbers are still reported, just as INFO rather than PASS/WARNING.
+hist-aer:
+  varying: [aerosol]
+  co2: fixed_1850
+  o3_default: auto
+  net_cooling: true   # anthropogenic aerosol: net cooling, NH-concentrated
+  note: "Aerosol not in Amon -> pyCFRAM aerosol decomposition always SKIPPED for this experiment"
+
+hist-GHG:
+  varying: [ghg]
+  co2: time_varying
+  o3_default: auto
+  net_cooling: false  # GHG forcing warms; the cooling gates do not apply
+
+hist-nat:
+  varying: [solar, volcanic]
+  co2: fixed_1850
+  o3_default: auto
+
+hist-stratO3:
+  varying: [o3]
+  co2: fixed_1850
+  o3_default: use_model   # O3 itself is the varying forcing -- must NOT inject climatology
+
+historical:
+  varying: [all]
+  co2: time_varying
+  o3_default: use_model

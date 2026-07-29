@@ -309,6 +309,17 @@ pyCFRAM/
 | `scripts/validate_vs_paper.py` | Surface dT comparison vs Wu et al. results |
 | `scripts/diag_cloud_column.py` / `diag_drdt_singlecol.py` | Single-column rad/Planck-matrix dumps for debugging |
 
+### Lapse-Rate kernel module
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/compute_lr_kernel.py` | M2: native ΔR_LR/ΔR_PL from `dT_observed`, per configured kernel (default CloudSat=Kramer + GFDL) |
+| `scripts/validate_lr_vs_climkern.py` | M2: cross-validate against ClimKern's `calc_T_feedbacks` (needs `pycfram-kern` env) |
+| `scripts/plot_lr_comparison.py` | M2: native/ClimKern/diff triptych + Kramer-vs-GFDL difference maps |
+| `scripts/compute_lr_attribution.py` | M3: per-physical-process (`dT_q`, `dT_atmdyn`, ...) lapse-rate attribution |
+| `scripts/plot_lr_attribution.py` | M3: per-process attribution maps + zonal-mean profile |
+| `data/kernel_source.py` | Stage CloudSat/GFDL kernel NetCDFs from the climkern install into `data/kernels/` |
+
 ## Decomposition Output
 
 `cases/<case>/output/cfram_result.nc` contains partial temperature changes `dT_*` and the underlying radiative forcings `frc_*` (W/m²), shape `(lev, lat, lon)` with surface at `lev[-1]`:
@@ -320,6 +331,72 @@ pyCFRAM/
 | Aerosol species | `bc`, `ocphi`, `ocpho`, `sulf`, `ss`, `dust` — sum ≈ bulk (small non-linear residual) |
 | Non-radiative | `lhflx`, `shflx` (forcing placed on surface row only) |
 | Derived | `atmdyn`, `sfcdyn`, `ocndyn`, `dry`, `observed` — `dry = atmdyn + sfcdyn`, `sfcdyn = ocndyn + lhflx + shflx` (exact) |
+
+## Lapse-Rate Kernel Module (M2/M3)
+
+A radiative-kernel Lapse-Rate/Planck decomposition, cross-validated against [ClimKern](https://github.com/tyfolino/climkern)'s `calc_T_feedbacks` — see [docs/m2_kernel_module.md](docs/m2_kernel_module.md) for the full write-up and [docs/m3_methodology_comparison.md](docs/m3_methodology_comparison.md) for the CFRAM-vs-kernel-method comparison + per-process attribution.
+
+```bash
+# Native module only (numpy/scipy/netCDF4, no xesmf needed):
+python scripts/compute_lr_kernel.py cesm2_4xco2_official
+python scripts/compute_lr_attribution.py cesm2_4xco2_official   # M3 route i: per-process attribution
+
+# Cross-validation against ClimKern (needs the `pycfram-kern` conda env, see docs/m2_kernel_module.md §Environment):
+conda activate pycfram-kern
+python scripts/validate_lr_vs_climkern.py cesm2_4xco2_official
+python scripts/plot_lr_comparison.py cesm2_4xco2_official
+
+# Or via run_case.py:
+python run_case.py cesm2_4xco2_official --step lr
+python run_case.py cesm2_4xco2_official --step lr-attr
+```
+
+## Phase 3: DAMIP Multi-Model Support
+
+Beyond ERA5/MERRA-2 and the single CESM2 4×CO2 dataset above, pyCFRAM can
+decompose **any CMIP6 DAMIP single-forcing experiment** (`hist-aer`,
+`hist-GHG`, `hist-nat`, `hist-stratO3`, ...) from **any** contributing
+model — a registered `cmip6_damip` data source
+(`data/cmip6_damip_source.py`) auto-detects each model's calendar, hybrid
+vertical-coordinate naming, native horizontal grid, and published pressure
+levels, and applies a documented missing-variable decision tree (cloud/O₃/
+solar/aerosol all have well-defined fallbacks) so that models missing
+cloud or ozone data — the common case, not the exception, across CMIP6 —
+still produce a physically valid decomposition. Base/perturbed states are
+the experiment's first-decade (1850–1859) vs last-available-decade
+climatology; a from-scratch, authentication-free ESGF download client
+(`data/esgf_fetch.py` + `scripts/download_damip.py`) handles data
+acquisition. As with the rest of pyCFRAM, `core/` and `fortran/` are
+untouched by any of this — DAMIP support is entirely a new data-source
+plugin feeding the existing generic writer and CFRAM engine.
+
+Nine models are validated end-to-end against real downloaded ESGF data:
+IPSL-CM6A-LR, MRI-ESM2-0, CESM2, CNRM-CM6-1, MIROC6, GISS-E2-1-G,
+HadGEM3-GC31-LL, and CanESM5 (the M4/M5 model set), plus NorESM2-LM as a
+worked "custom model accession" example showing that adding a model not in
+that list requires touching only a `configs/damip_models.d/<model>.yaml`
+and a `cases/<case>/case.yaml` — no Python changes. Each has a
+corresponding case directory:
+
+```
+cases/damip_{ipsl,mri,cesm2,cnrm,miroc6,giss,hadgem3,canesm5,noresm2}_histaer/
+```
+
+```bash
+# Build + run any DAMIP case exactly like an ERA5/CESM2 case:
+python3 run_case.py damip_ipsl_histaer --step build
+python3 run_case.py damip_ipsl_histaer --step run --nproc 200
+# Every run writes a human-readable cases/<case>/output/<case>.summary.txt
+# recording which processes were ACTIVE/SKIPPED/CLIMATOLOGY/ANALYTIC and why.
+```
+
+See [docs/plan_ph3.md](docs/plan_ph3.md) for the full Phase 3 execution
+plan (DAMIP protocol, cross-model heterogeneity strategy, ESGF data
+availability matrix), [docs/m4_damip_module.md](docs/m4_damip_module.md)
+for the module's architecture and the concrete cross-model bugs that
+shaped it, and [docs/m5_multimodel_userguide.md](docs/m5_multimodel_userguide.md)
+for the per-model support matrix, known-issues log, and the worked
+new-model-accession example.
 
 ## Input Data Format
 

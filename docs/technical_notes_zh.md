@@ -789,3 +789,224 @@ python3 scripts/plot_singlecol_profile.py climlab_4xco2 climlab_4xco2_fu   # 双
 
 两个引擎用相同的 climlab 输入跑出来,`dT_co2` / `dT_q` 个体量级差 10–15 %(不同 RT solver),但总 ECS-equivalent 响应在数值噪声内一致。这是独立于 OLD CFRAM 参考的有用 cross-check —— 任一引擎单独的 bug 都不会同时影响另一个。
 
+---
+
+## 15. Phase 2：辐射核 Lapse-Rate 模块
+
+### 15.1 这个模块解决什么问题
+
+CFRAM 给出的是**逐过程**温度分解，而气候反馈文献的主流口径是**辐射核方法**
+（radiative kernel）的 Planck / lapse-rate 拆分。两者物理含义不同、不能互相
+替代，但可以互相校验。M2/M3 把辐射核方法原生实现进 pyCFRAM，使同一个 case
+可以同时给出两套结果并做方法学对比。
+
+完整说明见 [`docs/m2_kernel_module.md`](m2_kernel_module.md)（模块本身）与
+[`docs/m3_methodology_comparison.md`](m3_methodology_comparison.md)
+（CFRAM vs 核方法对比 + 逐过程归因）。
+
+### 15.2 算法要点（`core/lr_kernel.py`）
+
+TOA 长波响应拆成"垂直均匀增温"（Planck）与"偏离均匀的部分"（lapse-rate）：
+
+```
+ΔR_LR = Σ_k K_lw(k) · (ΔT(k) − ΔTS) · dp(k)/1e4
+ΔR_PL = K_lw_ts · ΔTS + Σ_k K_lw(k) · ΔTS · dp(k)/1e4
+```
+
+- 对流层顶用标准诊断式 `3e4 − 2e4·cos(lat)` Pa。
+- 层厚 `dp` 把界面裁剪到 `[tropopause, ps]` 区间——**地下层和平流层自动
+  得到 `dp = 0`**，因此不需要额外掩膜逻辑，这一步同时解决了两个边界问题。
+- NaN 只在最后乘积那一步归零（`np.nan_to_num`），**不能提前 fillna**：
+  提前填零会把"地下外插污染的插值区间"当成真实零贡献。这个顺序与 ClimKern
+  的 `.fillna(0)` 位置严格对齐。
+
+### 15.3 不依赖 xesmf/ESMF（`core/kernels.py`）
+
+读 ClimKern 格式核文件后的水平重网格用自带的 scipy 双线性实现（经度周期
+延拓、纬度边界裁剪），与 xesmf 交叉验证 `corr > 0.999`。
+
+这是个工程决策而非偷懒：ESMF 栈只装在单独的 `pycfram-kern` conda 环境里，
+而核心模块必须在任何有 numpy/scipy/netCDF4 的机器上都能跑。交叉验证脚本
+`scripts/validate_lr_vs_climkern.py` 才需要那个环境。
+
+### 15.4 与 ClimKern 的数值一致性
+
+喂同一份 `dT_observed`，在 `cesm2_4xco2_official`（192×288 全球）上对比
+ClimKern 的 `calc_T_feedbacks`：
+
+| 核 | 面积加权相关 | 域平均相对差 | 合同门槛 (0.85 / 15%) |
+|---|---|---|---|
+| CloudSat (Kramer) | 0.9997 | 1.32% | PASS |
+| GFDL | 0.9999 | 0.02% | PASS |
+
+不仅过合同门槛，也超过计划里自设的"内部绿线"（corr ≥ 0.98、rel ≤ 5%）。
+
+### 15.5 逐过程归因（M3，`core/lr_attribution.py`）
+
+把每个 CFRAM 过程项（`dT_q`、`dT_atmdyn`、`dT_cloud` …）分别过一遍同一个
+核，回答"lapse-rate 反馈里各个物理过程各占多少"。可加性残差 CloudSat
+21.8%、GFDL 23.1%——这是 CFRAM 一阶展开的固有非线性，与气溶胶分物种
+（2.5–4%）、云 LW/SW（机器精度）等既有口径同源，**不是 bug**。
+
+> 路线选择：原计划的路线 ii（用 ω 做动力代理）需要 CMIP6 `wap` 变量，
+> 全仓库检索确认数据不可得，故改走路线 i（复用已有 11 个 dT 项）。
+> 决策备忘见 `docs/m3_route_decision_memo.md`。
+
+### 15.6 踩过的坑
+
+**netCDF4 masked array 陷阱（重犯一次）**：`np.array(masked_arr)` 会把
+masked（地下层）元素静默替换成原始 fill value（~1e36）而非 NaN，导致
+ΔR_LR 直接炸到 1e40 量级。修复：本模块所有读取一律走
+`np.ma.filled(arr, np.nan)`。
+
+同一类坑在 Phase 3 又以另一种形式出现——`data/cmip6_common.py` 的
+`annual_climo_from_monthly()` 用 `|value| > 1e15 → NaN` 在入口处拦截。
+**跨语言/跨库 I/O 的 fill value 必须在最外层显式转换**，这是本项目
+反复付学费的一条。
+
+### 15.7 入口脚本
+
+| 脚本 | 作用 |
+|---|---|
+| `scripts/compute_lr_kernel.py` | M2：原生 ΔR_LR/ΔR_PL |
+| `scripts/validate_lr_vs_climkern.py` | M2：对 ClimKern 交叉验证（需 `pycfram-kern` 环境）|
+| `scripts/compute_lr_attribution.py` | M3：逐过程 lapse-rate 归因 |
+| `scripts/plot_lr_comparison.py` | native/ClimKern/diff 三联图 + 双核差异图 |
+| `data/kernel_source.py` | 从 climkern 安装目录/Zenodo 落地核文件到 `data/kernels/`（gitignored）|
+
+---
+
+## 16. Phase 3：DAMIP 多模式支持
+
+### 16.1 目标与架构
+
+在 ERA5+MERRA-2、单一 CESM2 4×CO2 数据集之外，pyCFRAM 新增一个注册式数据源
+`data/cmip6_damip_source.py`（`@register_source('cmip6_damip')`），使其能吃
+**任意 CMIP6 模式**的**任意 DAMIP 单强迫实验**（`hist-aer`/`hist-GHG`/
+`hist-nat`/`hist-stratO3`……）。架构上完全复用已有链路：
+
+```
+case.yaml (source.type: cmip6_damip)
+  → run_case.py --step build（通用分发：非 cesm2_cmip6/None 都走这条路）
+  → scripts/build_case_input.py（SOURCE_MODULES 注册表触发 import 拿到插件）
+  → data/cmip6_damip_source.py :: build_states()
+        ├─ data/cmip6_common.py       （模式无关数值/探测机械）
+        ├─ configs/damip_models.d/<model>.yaml   （模式专属怪癖，可选）
+        └─ configs/damip_experiments.yaml        （实验语义，可选）
+  → validate_states() 写盘前拒 NaN → 4 个 pres/surf NC + nonrad_forcing.nc + provenance.json
+  → run_case.py --step run（scripts/run_parallel_python.py + fortran/cfram_rrtmg_1col，零改动）
+  → cfram_result.nc → scripts/write_run_summary.py → <case>.summary.txt
+```
+
+`core/` 与 `fortran/` 全程零改动——这是合同 M5 验收口径的硬性要求，由
+`tests/test_damip_userguide_example.py::test_phase3_diff_never_touches_core_or_fortran`
+对整条 Phase 3 分支做 `git diff --name-only` 机械化断言。完整架构图、IO 契约
+（`build_states()` 返回值、`provenance.json` 字段）、`build_states()` 十步流程
+逐步说明见 `docs/m4_damip_module.md`；每模式支持矩阵与已知问题库见
+`docs/m5_multimodel_userguide.md`。
+
+### 16.2 跨模式异构处理：真实踩坑记录
+
+13 个候选 hist-aer 模式里只有 3 个发布全部所需变量——**缺云/缺 O₃/缺 rsdt 是主
+路径，不是边缘情况**。以下每一条都是本阶段对真实下载的 ESGF 数据实测踩到的坑，
+不是预想的假设场景（呼应 §13 的踩坑记录风格）：
+
+- **日历**：`cmip6_common.decode_time()` 用 `cftime.num2date()` 替代早期
+  CESM2-only 的 `days/365.0` 算法（后者对除 noleap 外的日历全部静默算错）。M5
+  八模式跨 5 种日历：noleap（CESM2）、365_day（GISS/CanESM5）、gregorian
+  （IPSL/MIROC6）、proleptic_gregorian（MRI）、360_day（HadGEM3，每月恒 30 天）。
+- **IPSL-CM6A-LR 的 hybrid 垂直坐标，一次性踩了三个坑**：
+  1. `cl`/`clw`/`cli` 文件**完全没有 `formula_terms` 属性**，自动探测无字符串
+     可读——`configs/damip_models.d/IPSL-CM6A-LR.yaml` 显式给
+     `vertical: {scheme: hybrid_ap_b, ap: ap, b: b}` 覆盖。
+  2. `ap`/`b` 系数发布在**层界面**（`nlev+1` 个值）而非**层中点**（`nlev` 个值，
+     与数据本身的层维度一致）——`_read_hybrid_coeffs()` 相邻界面值配对平均，
+     这是**精确**而非近似的处理：因为 `p = ap·p0 + b·ps` 对 `ap`/`b` 是线性的，
+     两个界面气压平均恰好等于该层的中点气压。
+  3. IPSL 的混合层顺序是**地表→TOA**（`b` 从 ~1 降到 ~0），与 CESM2 原生
+     `hyam`/`hybm`（TOA→地表，`hybrid_to_plev_mass_conserving` 唯一验证过的
+     约定）相反。`_read_hybrid_coeffs()` 从 `b` 的单调方向自动探测并反转系数
+     数组；调用方必须用**同样的方式**反转云场数据本身——只反转一侧会把云廓线
+     悄悄打乱成一个"看起来合理但物理错误"的近零云场（本 bug 最初不是崩溃发现
+     的，而是靠对照真实原始数据的云量数量级做 sanity check 才定位到）。
+- **CNRM-CM6-1 的非标准属性名**：`lev` 坐标携带 `formula_term`（单数），不是
+  标准 CF 的 `formula_terms`（复数）——CERFACS 的 CMOR 配置怪癖。自动探测找不到
+  该字符串，静默落到错误的（当作已在 plev 上）分支。同样用 models.d 的
+  `vertical:` 覆盖解决。
+- **HadGEM3-GC31-LL 的 hybrid-height 坐标（真正无法支持的坐标类型）**：
+  `formula_terms = "a: lev b: b orog: orog"`，即 `z = a + b·orog`——**高度**混合
+  坐标而非**气压**混合坐标。`detect_vertical()` 对无法识别的 `formula_terms`
+  正确抛出 `ValueError`；`cmip6_damip_source.py` 捕获这个异常，降级为
+  `cloud=SKIPPED` 而不是让整个 build 崩溃。真正支持 hybrid-height 需要模式自身
+  温度廓线做高度→气压反演，是另一种物理转换，不是系数命名的变体——列为
+  known-issue（`docs/plan_ph3.md` §12 R4），不强行适配。
+- **MRI-ESM2-0 的 `o3` 发布在比同模式其它变量更粗的原生网格上**（64×128 vs
+  ta/hus/cl 等的 160×320——CMIP6 并不要求同一 table 内所有变量共享一套网格）。
+  加了 `cmip6_common.regrid_horizontal_bilinear()`（双线性、经度周期）。这个
+  regrid 还牵出**第二个坑**：CMIP6 标准的下层大气缺测掩膜（高地形区，如青藏
+  高原上空 1000 hPa 层为 NaN）如果不先处理，双线性插值会把 NaN 扩散到相邻的
+  **有效**格点——不只是原本缺测的点。`cmip6_common.
+  fill_nan_hold_toward_surface()` 在 regrid 前把地表端的 NaN 段用最浅有效层
+  的值填住，regrid 之后，最终、真正 ps-aware 的 `fill_subsurface()`（用**目标**
+  网格自己的 ps）仍然照常在下游跑一遍——前者只是 regrid 这一步的 NaN 传播
+  防护，不是最终的子地表处理。
+- **单位换算**：`cl` 是 %（÷100 转 0–1 分数）；`o3` 是 mol/mol（×48/29 转
+  kg/kg，`VMR_TO_MMR`，与既有 `scripts/inject_cesm_o3.py` 同一常数）。O₃ 单位
+  换算漏做是 **5 个数量级**的错误，不是小误差——正是 2026-05-10/12
+  session_log 记录的"huss-as-O3"数据损坏事故的近亲（协作者的 Fortran CFRAM
+  曾把比湿误当 O3 喂进辐射方案）。`cmip6_damip_source.py` 的 O₃ 分支刻意让这
+  类错误难以复现：换算只在一处、读入 mol/mol 字段后立即执行一次。
+
+### 16.3 ESGF 下载客户端（`data/esgf_fetch.py` + `scripts/download_damip.py`）
+
+纯 stdlib（只用 `urllib`，不依赖 `requests`/`intake-esgf`/`esgpull`），免认证
+下载（DKRZ/CEDA 经典 Solr 搜索 + HTTP Range 请求）。三个真实踩坑：
+
+- **未过滤 variant 导致下载体积膨胀**：IPSL-CM6A-LR 一个模式就发布 10 个
+  `hist-aer` variant，不加过滤的 `--model IPSL-CM6A-LR` dry-run 报出 54.8 GB
+  （应为约 20.4 GB/variant）。修复：`download_damip.py` 的 `MODEL_DEFAULTS` 表
+  给每个模式一个默认 `(variant_label, grid_label)`——代码注释明确写"这不是可选
+  的体积优化，遗漏它是正确性 bug"。
+- **跨节点 replica 重复，且 Solr 的 `replica` 标志不可靠**：同一物理文件常被
+  多个 ESGF 数据节点索引（如 CNRM 的家节点 + DKRZ 镜像）。直觉修法——按
+  `replica=false` 过滤——**行不通**：部分模式（实测：MRI-ESM2-0）在 DKRZ/CEDA
+  上全部被标记 `replica=true`（因为这两个节点都不是该模式的家节点），
+  `replica=false` 会返回**零结果**，即使数据其实可下载。改用文件名去重
+  （`search_damip_files()`），并**保留每个文件名对应的所有已知 URL**（而非只
+  留第一个），为下面的镜像回退铺路。
+- **`checksum`/`checksum_type` 是 Solr 多值字段**：返回的是列表（如
+  `checksum_type=['SHA256']`）而非标量。这个 bug 只有在一次真实的完整下载
+  （1.5 GB）走到校验步骤时才会暴露——dry-run 根本走不到这一步。
+- **CNRM-CM6-1 家节点超时，镜像可用**：`esg1.umr-cnrm.fr` 对 `cl` 的 17 个
+  分片文件中 7 个超时；`esgf3.dkrz.de` 完全可用。`download_files()` 现在按序
+  重试每个已知镜像 URL，而非第一个 URL 失败就放弃。
+- **`http.client.RemoteDisconnected` 不是 `urllib.error.URLError` 的子类**：
+  在为 WP-M5.3 准备 NorESM2-LM dry-run 时，`list_files()` 的 `urlopen()`
+  调用因此未捕获崩溃。`esgf_fetch.py` 里所有原本只捕获 `URLError` 的
+  except 子句（`search_datasets` ×2、`list_files`、`fetch`）现在都同时捕获
+  `OSError`（commit `15a2845`）。
+
+### 16.4 如何接入新模式（NorESM2-LM 实测例子）
+
+WP-M5.3 用 NorESM2-LM（不在 M4/M5 八模式清单内）验证了"接入新模式只需
+`configs/damip_models.d/<model>.yaml` + `cases/<case>/case.yaml` 两个 yaml 文件，
+零 Python 改动"这条路径。2026-07-06 hqlx210 实测：build 一次成功；run 87.5 秒
+（13824 格点，NorESM2-LM 原生 96×144 网格）；`cfram_result.nc` 零 NaN；恒等式
+`dT_sfcdyn = dT_ocndyn + dT_lhflx + dT_shflx` 残差 ~4.6e-15 K（机器精度）；全球
+均值 `dT_observed[sfc] = -1.05 K`（净冷却，符号正确），北半球 `-1.72 K` 冷于
+南半球 `-0.37 K`（符合人为气溶胶集中北半球的预期）。完整 yaml 内容 + 永久回归
+门 `tests/test_damip_userguide_example.py` 说明见
+`docs/m5_multimodel_userguide.md` §"如何接入新模式"一节。
+
+### 16.5 覆盖率与测试
+
+```bash
+coverage run -m pytest tests/ -q
+coverage report -m --include="*/data/cmip6_common.py,*/data/cmip6_damip_source.py,*/data/esgf_fetch.py"
+```
+
+2026-07-06 复核（新增 regrid/hybrid-height try-except/多镜像回退/OSError 捕获
+等逻辑之后）：`cmip6_common.py` 98%、`cmip6_damip_source.py` 92%、
+`esgf_fetch.py` 99%，均远高于合同 60% 硬指标，相对 WP-M4.6 首次测量的
+98%/93%/98% 无实质回退。
+

@@ -1,0 +1,19 @@
+# DAMIP model quirks: CESM2 (docs/plan_ph3.md §4.2, §1.4)
+#
+# hist-aer "skip full house" demonstrator: missing cl/clw/cli (cloud->SKIPPED),
+# rsdt (solar->ANALYTIC), o3 (o3=auto -> CLIMATOLOGY injection). In the
+# suggested-model list from the contract; data ends 2014-12 so warm_years is
+# shifted a decade earlier than IPSL/MRI.
+institution_id: NCAR
+default_variant: r1i1p1f1
+default_grid: gn
+calendar: noleap
+warm_years_default: [2005, 2014]     # hist-aer data ends 2014-12 (measured)
+vertical:
+  scheme: hybrid_ab_p0
+  a: a
+  b: b
+  p0: p0
+missing_ok: [cl, clw, cli, rsdt, o3]  # declarative: these gaps are expected/OK
+                                      # (drives cloud=SKIPPED, solar=ANALYTIC,
+                                      # o3=CLIMATOLOGY -- see §6.1 decision tree)

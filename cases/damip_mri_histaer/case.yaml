@@ -1,0 +1,43 @@
+# DAMIP M4 end-to-end case: MRI-ESM2-0 hist-aer, real ESGF data
+# (downloaded to hqlx210 via scripts/download_damip.py --model MRI-ESM2-0
+# --experiment hist-aer). Full-variable model (14/14 vars incl. o3, rsdt) --
+# second M4 full-variable baseline, see configs/damip_models.d/MRI-ESM2-0.yaml.
+case_name: DAMIP_MRI_histaer
+description: "MRI-ESM2-0 hist-aer, first decade (1850-1859) vs last decade (2011-2020) climatology"
+
+source:
+  type: cmip6_damip
+  model: MRI-ESM2-0
+  experiment: hist-aer
+  variant: r1i1p1f1
+  grid_label: gn
+  raw_dir: raw_data/cmip6_damip/MRI-ESM2-0/hist-aer
+  base_years: [1850, 1859]
+  warm_years: [2011, 2020]
+  co2:
+    source: constant
+    base_ppmv: 284.7
+    perturbed_ppmv: 284.7      # hist-aer: CO2 frozen at 1850 -> two states equal
+  o3: auto                     # MRI publishes o3 -> resolves to use_model (MODEL)
+  aerosol:
+    source: zero                # hist-aer: no 3D aerosol in Amon -> runner auto-skips
+
+grid:
+  pressure_levels: [1, 5, 10, 20, 30, 50, 70, 100, 150, 200, 250, 300,
+                    400, 500, 600, 700, 850, 925, 1000]   # CMIP6 standard plev19, TOA->sfc
+
+input:
+  base_pres: input/base_pres.nc
+  base_surf: input/base_surf.nc
+  perturbed_pres: input/perturbed_pres.nc
+  perturbed_surf: input/perturbed_surf.nc
+  nonrad_forcing: input/nonrad_forcing.nc
+
+radiation:
+  scheme: rrtmg
+
+run:
+  nproc: auto
+
+plot:
+  key_region: {lon: [0, 360], lat: [-90, 90]}

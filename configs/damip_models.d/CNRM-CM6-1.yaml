@@ -1,0 +1,22 @@
+# DAMIP model quirks: CNRM-CM6-1 (docs/plan_ph3.md §4.2, §1.4)
+#
+# Full-variable model (14/14 vars incl. o3) -- M5's f2-variant + gr-grid
+# heterogeneity coverage sample (M4 used f1 exclusively).
+institution_id: CNRM-CERFACS
+default_variant: r1i1p1f2   # NOT f1 -- CNRM-CM6-1 hist-aer publishes as f2
+default_grid: gr
+calendar: gregorian
+warm_years_default: [2011, 2020]
+vertical:
+  # Explicit override, NOT auto -- confirmed against real downloaded data:
+  # CNRM's `lev` coordinate uses a non-standard CMOR attribute name
+  # `formula_term` (singular -- a CNRM/CERFACS CMOR-configuration quirk, not
+  # the standard CF `formula_terms`), so cmip6_common.detect_vertical's
+  # auto-probe never finds it and falls through to the wrong (already-on-
+  # plev) branch. ap/b are already at cl's own midlayer resolution (91==91,
+  # no interface-averaging needed, unlike IPSL) and stored surface->TOA
+  # (b descends 0.998->0.0) -- the existing generic order-flip detection in
+  # _read_hybrid_coeffs handles that automatically once the scheme is known.
+  scheme: hybrid_ap_b
+  ap: ap
+  b: b
