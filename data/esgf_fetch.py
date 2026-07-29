@@ -93,6 +93,58 @@ def search_datasets(
             raise RuntimeError(f"ESGF search failed ({node}): {e}")
 
 
+# OPENDAP browse endpoints are served over http(s) too, so "starts with
+# http" alone does not identify a downloadable file. These substrings mark
+# the THREDDS OPENDAP service, whose URL is an HTML page, not the NetCDF.
+_OPENDAP_HINTS = ('/dodsC/', '.nc.html')
+
+
+def _pick_http_url(url_entries: List[str]) -> Optional[str]:
+    """Pick the HTTPServer (direct file download) URL out of ESGF's
+    multi-valued Solr ``url`` field.
+
+    ESGF's real wire format is ``<url>|<mime_type>|<service_name>`` --
+    verified against live DKRZ and CEDA responses, e.g.::
+
+        https://esgf.ceda.ac.uk/thredds/fileServer/.../ta_....nc|application/netcdf|HTTPServer
+        https://esgf.ceda.ac.uk/thredds/dodsC/.../ta_....nc.html|application/opendap-html|OPENDAP
+        gsiftp://esgf3.dkrz.de:2811//.../ta_....nc|application/gridftp|GridFTP
+        globus:4981cd16-.../ta_....nc|Globus|Globus
+
+    The service name is the LAST token, so it must be matched positionally
+    rather than assumed adjacent to the URL. Entry order is not guaranteed
+    by ESGF; picking "the first token that starts with http" returns the
+    OPENDAP *.html* browse page whenever OPENDAP happens to be listed first,
+    which then gets written to disk under a ``.nc`` name (checksum
+    mismatch at best, an HTML file masquerading as NetCDF at worst).
+    """
+    # Pass 1: an entry that explicitly declares the HTTPServer service.
+    for url_str in url_entries:
+        parts = [p.strip() for p in str(url_str).split('|')]
+        if not any(p == 'HTTPServer' for p in parts):
+            continue
+        for part in parts:
+            if part.startswith('http'):
+                return part
+
+    # Pass 2: no HTTPServer label anywhere -- take an http URL that is at
+    # least not an OPENDAP browse endpoint.
+    for url_str in url_entries:
+        for part in str(url_str).split('|'):
+            part = part.strip()
+            if part.startswith('http') and not any(h in part for h in _OPENDAP_HINTS):
+                return part
+
+    # Pass 3 (last resort): any http URL at all.
+    for url_str in url_entries:
+        for part in str(url_str).split('|'):
+            part = part.strip()
+            if part.startswith('http'):
+                return part
+
+    return None
+
+
 def list_files(
     dataset_id: str,
     node: str = "https://esgf-data.dkrz.de/esg-search/search"
@@ -122,35 +174,11 @@ def list_files(
             for doc in data.get('response', {}).get('docs', []):
                 # url is a multi-valued Solr field: one pipe-separated
                 # "url|mimetype|service" string per access service (HTTPServer,
-                # OPENDAP, GridFTP, ...), in no guaranteed order. Search every
-                # entry for the HTTPServer one instead of assuming entry[0] is
-                # it -- a single-entry list happened to have HTTPServer first
-                # in early testing, but that's not a documented guarantee.
+                # OPENDAP, GridFTP, Globus, ...), in no guaranteed order.
+                # See _pick_http_url for the service-token matching rules.
                 url_field = doc.get('url', '')
                 url_entries = url_field if isinstance(url_field, list) else [url_field]
-
-                http_url = None
-                for url_str in url_entries:
-                    parts = url_str.split('|')
-                    for i, part in enumerate(parts):
-                        if i > 0 and parts[i - 1] == 'HTTPServer' and part.startswith('http'):
-                            http_url = part
-                            break
-                        elif part.startswith('http') and i + 1 < len(parts) and parts[i + 1] == 'HTTPServer':
-                            http_url = part
-                            break
-                    if http_url:
-                        break
-
-                # Fallback: just take first URL that looks like http, from any entry
-                if not http_url:
-                    for url_str in url_entries:
-                        for part in url_str.split('|'):
-                            if part.startswith('http'):
-                                http_url = part
-                                break
-                        if http_url:
-                            break
+                http_url = _pick_http_url(url_entries)
 
                 if http_url:
                     # checksum/checksum_type are Solr multi-valued fields
@@ -281,7 +309,20 @@ def fetch(
 
     try:
         with urllib.request.urlopen(req, timeout=60) as response:
-            mode = 'ab' if (resume and is_partial) else 'wb'
+            # Sending a Range header does NOT guarantee a ranged reply: a
+            # server (or an intercepting proxy/mirror) may ignore it and
+            # answer 200 with the FULL body. Appending that to the partial
+            # file yields a (partial + full) frankenfile -- caught only if a
+            # checksum was supplied, silently corrupt otherwise. Append only
+            # on a genuine 206 Partial Content; anything else means we hold
+            # the whole body and must overwrite from byte 0.
+            append = False
+            if resume and is_partial:
+                status = getattr(response, 'status', None)
+                if status is None and hasattr(response, 'getcode'):
+                    status = response.getcode()
+                append = (status == 206)
+            mode = 'ab' if append else 'wb'
             with open(dest, mode) as f:
                 while True:
                     chunk = response.read(8192)

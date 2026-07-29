@@ -546,12 +546,32 @@ Sections, in order:
    separate from the bulk sum rather than double-counted). Explicitly
    cites `docs/m3_methodology_comparison.md` for why a residual here is
    expected first-order-CFRAM non-linearity, not a bug.
-4. **Single-forcing consistency** — the §5.2 sanity-check values
+4. **Acceptance gates** — the M4 end-to-end gate from `docs/plan_ph3.md`
+   §8, recomputed from `cfram_result.nc` on every run rather than checked
+   once by hand:
+   - `sfcdyn_identity_max_abs` — max over **all levels** of
+     `|dT_ocndyn + dT_lhflx + dT_shflx − dT_sfcdyn|`, gated at 1e-10 K.
+     This identity holds by construction, so a non-trivial value means the
+     decomposition wiring regressed; it is the cheapest tripwire in the
+     pipeline, and is where a real double-counting bug first surfaced
+     (`session_log.md` 2026-06-01). Measured 3.6e-15 – 1.6e-14 K across the
+     nine M4/M5 cases.
+   - `dT_observed[sfc] NaN frac` — gated at 0. Below-ground *atmospheric*
+     levels are legitimately NaN (`plev > local ps`, ~40% of cells at
+     1000 hPa), so only the surface row is gated.
+   - `dT_observed[sfc] gmean` and `NH vs SH mean` — area-weighted, judged
+     only for experiments carrying `net_cooling: true` in
+     `configs/damip_experiments.yaml` (hist-aer expects net cooling in
+     (−3, 0) K with the NH cooler, since anthropogenic aerosol is
+     NH-concentrated). For other experiments the same numbers are printed
+     as INFO rather than judged against the wrong expectation — hist-GHG
+     warms.
+5. **Single-forcing consistency** — the §5.2 sanity-check values
    (`co2_equal`, `o3_rel_diff`, `solar_max_abs_diff_wm2`) with a PASS/
    WARNING judgment looked up against `configs/damip_experiments.yaml`
    (so, e.g., `hist-nat` legitimately showing a large solar diff is not
    flagged, since solar *is* that experiment's own varying forcing).
-5. **Footer** — reproduction command + md5 of every input NetCDF.
+6. **Footer** — reproduction command + md5 of every input NetCDF.
 
 ## Contract compliance
 

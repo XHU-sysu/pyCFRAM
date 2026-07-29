@@ -343,7 +343,55 @@ or any gfortran-only host).
 
 ---
 
-## 12. Phase 3: DAMIP multi-model data source
+## 12. Phase 2: radiative-kernel lapse-rate module
+
+An independent, second opinion on CFRAM's temperature decomposition: the
+conventional radiative-kernel method, reimplemented natively so it can be
+run side by side with the CFRAM result on the same case. Full write-up in
+[`docs/m2_kernel_module.md`](m2_kernel_module.md); the method-vs-method
+comparison and per-process attribution are in
+[`docs/m3_methodology_comparison.md`](m3_methodology_comparison.md).
+
+- **What it computes.** `core/lr_kernel.py` splits the TOA LW response to a
+  temperature change into a Planck part (vertically uniform warming at the
+  surface value) and a lapse-rate part (the departure from uniform):
+  `ΔR_LR = Σ_k K_lw(k)·(ΔT(k) − ΔTS)·dp(k)/1e4`. The tropopause is the
+  standard diagnostic `3e4 − 2e4·cos(lat)` Pa, and layer thicknesses are
+  clipped to `[tropopause, ps]` so below-ground and stratospheric layers
+  drop out of the sum with `dp = 0` rather than needing a separate mask.
+- **No xesmf/ESMF dependency.** `core/kernels.py` reads ClimKern-format
+  kernel files and regrids them with a self-contained scipy bilinear
+  interpolator (periodic in longitude, clip-to-boundary in latitude),
+  cross-validated to `corr > 0.999` against xesmf. This matters
+  operationally: the module runs on any host with numpy/scipy/netCDF4,
+  while the ESMF stack only exists in the separate `pycfram-kern` env used
+  for the cross-check script.
+- **Validated against ClimKern.** Fed the same `dT_observed`, the native
+  implementation reproduces ClimKern's `calc_T_feedbacks` on
+  `cesm2_4xco2_official` at corr 0.9997 / 1.32% domain-mean relative
+  difference (CloudSat–Kramer kernel) and 0.9999 / 0.02% (GFDL) — against
+  a contract gate of 0.85 / 15%.
+- **Per-process attribution (M3).** `core/lr_attribution.py` pushes each
+  CFRAM process term (`dT_q`, `dT_atmdyn`, …) through the same kernel to
+  ask how much of the lapse-rate feedback each process is responsible for.
+  Additivity residual is ~22–23% of the mean |total| — the expected
+  first-order-expansion non-linearity, the same order as the aerosol and
+  cloud additivity residuals documented elsewhere, not a defect.
+- **The trap worth repeating.** netCDF4 returns masked arrays;
+  `np.array(masked)` silently substitutes the raw fill value (~1e36) for
+  masked points instead of NaN, which made ΔR_LR blow up to 1e40 before it
+  was caught. Every read in this module goes through
+  `np.ma.filled(arr, np.nan)`. The same class of bug is why
+  `data/cmip6_common.py` converts `|value| > 1e15` to NaN on ingest.
+
+Entry points: `scripts/compute_lr_kernel.py` (native ΔR_LR/ΔR_PL),
+`scripts/validate_lr_vs_climkern.py` (cross-check, needs `pycfram-kern`),
+`scripts/compute_lr_attribution.py` (M3), `scripts/plot_lr_comparison.py`.
+Kernel NetCDFs are staged by `data/kernel_source.py` and are gitignored.
+
+---
+
+## 13. Phase 3: DAMIP multi-model data source
 
 A registered data source (`data/cmip6_damip_source.py`, `@register_source
 ('cmip6_damip')`) lets pyCFRAM ingest any CMIP6 DAMIP single-forcing

@@ -370,3 +370,124 @@ def test_missing_cfram_result_exits_nonzero(smoke_case):
     result = _run_summary_script()
     assert result.returncode != 0
     assert 'cfram_result.nc' in (result.stderr + result.stdout)
+
+
+# ---------------------------------------------------------------------------
+# M4 acceptance gates (docs/plan_ph3.md §8 "Done(=M4 端到端门)")
+#
+# These were previously checked once by hand and never persisted anywhere, so
+# a regression in any of them would have been invisible in the run artifacts.
+# ---------------------------------------------------------------------------
+
+def _write_result_nc(path, nlat=8, nlon=6, nlev=5, obs_sfc=None,
+                     break_identity=False, surface_nan=False):
+    """Synthesize a minimal cfram_result.nc exercising the gate logic.
+
+    Global latitudes (both hemispheres) so the NH/SH comparison is defined,
+    unlike tests/data/smoke/cfram_result_mini.nc which is an 8x8 NH-only
+    regional crop.
+    """
+    from netCDF4 import Dataset as _DS
+    lat = np.linspace(-78.75, 78.75, nlat)
+    lon = np.linspace(0.0, 360.0 - 360.0 / nlon, nlon)
+
+    if obs_sfc is None:
+        # Net cooling, stronger in the NH -- the hist-aer expectation.
+        obs_sfc = -0.5 + np.where(lat > 0, -0.5, 0.0)[:, None] * np.ones((1, nlon))
+        obs_sfc = np.broadcast_to(obs_sfc, (nlat, nlon)).copy()
+
+    with _DS(path, 'w', format='NETCDF4') as d:
+        d.createDimension('lev', nlev)
+        d.createDimension('lat', nlat)
+        d.createDimension('lon', nlon)
+        d.createVariable('lat', 'f8', ('lat',))[:] = lat
+        d.createVariable('lon', 'f8', ('lon',))[:] = lon
+        d.createVariable('lev', 'f8', ('lev',))[:] = np.linspace(1000.0, 100.0, nlev)
+
+        obs = np.zeros((nlev, nlat, nlon))
+        obs[-1] = obs_sfc
+        if surface_nan:
+            obs[-1, 0, 0] = np.nan
+        d.createVariable('dT_observed', 'f8', ('lev', 'lat', 'lon'))[:] = obs
+
+        rng = np.random.default_rng(0)
+        ocndyn = rng.normal(size=(nlev, nlat, nlon))
+        lhflx = rng.normal(size=(nlev, nlat, nlon))
+        shflx = rng.normal(size=(nlev, nlat, nlon))
+        sfcdyn = ocndyn + lhflx + shflx          # exact identity by construction
+        if break_identity:
+            sfcdyn = sfcdyn + 1e-3               # well above the 1e-10 K gate
+        for name, arr in (('dT_ocndyn', ocndyn), ('dT_lhflx', lhflx),
+                          ('dT_shflx', shflx), ('dT_sfcdyn', sfcdyn)):
+            d.createVariable(name, 'f8', ('lev', 'lat', 'lon'))[:] = arr
+    return path
+
+
+def _gate_rows(path, experiment='hist-aer'):
+    gates = wrs.compute_acceptance_gates(path)
+    return dict((k, (v, j)) for k, v, j
+                in wrs.judge_acceptance_gates(gates, experiment,
+                                              wrs.load_damip_experiments_cfg()))
+
+
+def test_acceptance_gates_all_pass_on_a_healthy_result(tmp_path):
+    rows = _gate_rows(_write_result_nc(str(tmp_path / 'r.nc')))
+    assert all('PASS' in judgment for _value, judgment in rows.values()), rows
+    assert 'PASS (< 1e-10 K)' in rows['sfcdyn_identity_max_abs'][1]
+    assert 'net cooling' in rows['dT_observed[sfc] gmean'][1]
+    assert 'NH cooler' in rows['NH vs SH mean'][1]
+
+
+def test_acceptance_gates_flag_broken_sfcdyn_identity(tmp_path):
+    rows = _gate_rows(_write_result_nc(str(tmp_path / 'r.nc'), break_identity=True))
+    value, judgment = rows['sfcdyn_identity_max_abs']
+    assert 'WARNING' in judgment and 'identity broken' in judgment
+    assert float(value.split()[0]) > 1e-10
+
+
+def test_acceptance_gates_flag_nan_leaking_into_surface_row(tmp_path):
+    rows = _gate_rows(_write_result_nc(str(tmp_path / 'r.nc'), surface_nan=True))
+    assert 'WARNING' in rows['dT_observed[sfc] NaN frac'][1]
+
+
+def test_acceptance_gates_flag_wrong_sign_for_a_cooling_experiment(tmp_path):
+    """A hist-aer run that comes out net-warming, or NH-warmer-than-SH, is a
+    physical red flag -- exactly what caught the ERA5 tisr 6x bug in Phase 1
+    (session_log.md 2026-04-12, cloud dT sign flip)."""
+    nlat, nlon = 8, 6
+    lat = np.linspace(-78.75, 78.75, nlat)
+    warming_nh = (0.5 + np.where(lat > 0, 0.5, 0.0))[:, None] * np.ones((1, nlon))
+    rows = _gate_rows(_write_result_nc(str(tmp_path / 'r.nc'),
+                                       obs_sfc=np.broadcast_to(warming_nh, (nlat, nlon)).copy()))
+    assert 'WARNING' in rows['dT_observed[sfc] gmean'][1]
+    assert 'WARNING' in rows['NH vs SH mean'][1]
+
+
+def test_acceptance_gates_report_info_for_a_non_cooling_experiment(tmp_path):
+    """hist-GHG warms; judging it against the aerosol cooling band would be
+    wrong. The numbers are still reported, just as INFO."""
+    rows = _gate_rows(_write_result_nc(str(tmp_path / 'r.nc')), experiment='hist-GHG')
+    assert 'INFO' in rows['dT_observed[sfc] gmean'][1]
+    assert 'INFO' in rows['NH vs SH mean'][1]
+    # The construction identity is experiment-independent and still gated.
+    assert 'PASS' in rows['sfcdyn_identity_max_abs'][1]
+
+
+def test_acceptance_gates_identity_na_when_components_absent(tmp_path):
+    from netCDF4 import Dataset as _DS
+    path = str(tmp_path / 'r.nc')
+    _write_result_nc(path)
+    with _DS(path, 'a') as d:
+        d.renameVariable('dT_sfcdyn', 'dT_sfcdyn_removed')
+    rows = _gate_rows(path)
+    assert rows['sfcdyn_identity_max_abs'] == ('n/a',
+                                               'INFO (dT_sfcdyn/ocndyn/lhflx/shflx not all present)')
+
+
+def test_acceptance_gates_section_appears_in_summary_text(smoke_case):
+    result = _run_summary_script()
+    assert result.returncode == 0
+    text = open(os.path.join(smoke_case, 'output', '%s.summary.txt' % CASE_NAME)).read()
+    assert 'Acceptance gates' in text
+    assert 'sfcdyn_identity_max_abs' in text
+    assert 'dT_observed[sfc] NaN frac' in text

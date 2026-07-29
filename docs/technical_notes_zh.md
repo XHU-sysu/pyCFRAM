@@ -791,9 +791,94 @@ python3 scripts/plot_singlecol_profile.py climlab_4xco2 climlab_4xco2_fu   # 双
 
 ---
 
-## 15. Phase 3：DAMIP 多模式支持
+## 15. Phase 2：辐射核 Lapse-Rate 模块
 
-### 15.1 目标与架构
+### 15.1 这个模块解决什么问题
+
+CFRAM 给出的是**逐过程**温度分解，而气候反馈文献的主流口径是**辐射核方法**
+（radiative kernel）的 Planck / lapse-rate 拆分。两者物理含义不同、不能互相
+替代，但可以互相校验。M2/M3 把辐射核方法原生实现进 pyCFRAM，使同一个 case
+可以同时给出两套结果并做方法学对比。
+
+完整说明见 [`docs/m2_kernel_module.md`](m2_kernel_module.md)（模块本身）与
+[`docs/m3_methodology_comparison.md`](m3_methodology_comparison.md)
+（CFRAM vs 核方法对比 + 逐过程归因）。
+
+### 15.2 算法要点（`core/lr_kernel.py`）
+
+TOA 长波响应拆成"垂直均匀增温"（Planck）与"偏离均匀的部分"（lapse-rate）：
+
+```
+ΔR_LR = Σ_k K_lw(k) · (ΔT(k) − ΔTS) · dp(k)/1e4
+ΔR_PL = K_lw_ts · ΔTS + Σ_k K_lw(k) · ΔTS · dp(k)/1e4
+```
+
+- 对流层顶用标准诊断式 `3e4 − 2e4·cos(lat)` Pa。
+- 层厚 `dp` 把界面裁剪到 `[tropopause, ps]` 区间——**地下层和平流层自动
+  得到 `dp = 0`**，因此不需要额外掩膜逻辑，这一步同时解决了两个边界问题。
+- NaN 只在最后乘积那一步归零（`np.nan_to_num`），**不能提前 fillna**：
+  提前填零会把"地下外插污染的插值区间"当成真实零贡献。这个顺序与 ClimKern
+  的 `.fillna(0)` 位置严格对齐。
+
+### 15.3 不依赖 xesmf/ESMF（`core/kernels.py`）
+
+读 ClimKern 格式核文件后的水平重网格用自带的 scipy 双线性实现（经度周期
+延拓、纬度边界裁剪），与 xesmf 交叉验证 `corr > 0.999`。
+
+这是个工程决策而非偷懒：ESMF 栈只装在单独的 `pycfram-kern` conda 环境里，
+而核心模块必须在任何有 numpy/scipy/netCDF4 的机器上都能跑。交叉验证脚本
+`scripts/validate_lr_vs_climkern.py` 才需要那个环境。
+
+### 15.4 与 ClimKern 的数值一致性
+
+喂同一份 `dT_observed`，在 `cesm2_4xco2_official`（192×288 全球）上对比
+ClimKern 的 `calc_T_feedbacks`：
+
+| 核 | 面积加权相关 | 域平均相对差 | 合同门槛 (0.85 / 15%) |
+|---|---|---|---|
+| CloudSat (Kramer) | 0.9997 | 1.32% | PASS |
+| GFDL | 0.9999 | 0.02% | PASS |
+
+不仅过合同门槛，也超过计划里自设的"内部绿线"（corr ≥ 0.98、rel ≤ 5%）。
+
+### 15.5 逐过程归因（M3，`core/lr_attribution.py`）
+
+把每个 CFRAM 过程项（`dT_q`、`dT_atmdyn`、`dT_cloud` …）分别过一遍同一个
+核，回答"lapse-rate 反馈里各个物理过程各占多少"。可加性残差 CloudSat
+21.8%、GFDL 23.1%——这是 CFRAM 一阶展开的固有非线性，与气溶胶分物种
+（2.5–4%）、云 LW/SW（机器精度）等既有口径同源，**不是 bug**。
+
+> 路线选择：原计划的路线 ii（用 ω 做动力代理）需要 CMIP6 `wap` 变量，
+> 全仓库检索确认数据不可得，故改走路线 i（复用已有 11 个 dT 项）。
+> 决策备忘见 `docs/m3_route_decision_memo.md`。
+
+### 15.6 踩过的坑
+
+**netCDF4 masked array 陷阱（重犯一次）**：`np.array(masked_arr)` 会把
+masked（地下层）元素静默替换成原始 fill value（~1e36）而非 NaN，导致
+ΔR_LR 直接炸到 1e40 量级。修复：本模块所有读取一律走
+`np.ma.filled(arr, np.nan)`。
+
+同一类坑在 Phase 3 又以另一种形式出现——`data/cmip6_common.py` 的
+`annual_climo_from_monthly()` 用 `|value| > 1e15 → NaN` 在入口处拦截。
+**跨语言/跨库 I/O 的 fill value 必须在最外层显式转换**，这是本项目
+反复付学费的一条。
+
+### 15.7 入口脚本
+
+| 脚本 | 作用 |
+|---|---|
+| `scripts/compute_lr_kernel.py` | M2：原生 ΔR_LR/ΔR_PL |
+| `scripts/validate_lr_vs_climkern.py` | M2：对 ClimKern 交叉验证（需 `pycfram-kern` 环境）|
+| `scripts/compute_lr_attribution.py` | M3：逐过程 lapse-rate 归因 |
+| `scripts/plot_lr_comparison.py` | native/ClimKern/diff 三联图 + 双核差异图 |
+| `data/kernel_source.py` | 从 climkern 安装目录/Zenodo 落地核文件到 `data/kernels/`（gitignored）|
+
+---
+
+## 16. Phase 3：DAMIP 多模式支持
+
+### 16.1 目标与架构
 
 在 ERA5+MERRA-2、单一 CESM2 4×CO2 数据集之外，pyCFRAM 新增一个注册式数据源
 `data/cmip6_damip_source.py`（`@register_source('cmip6_damip')`），使其能吃
@@ -820,7 +905,7 @@ case.yaml (source.type: cmip6_damip)
 逐步说明见 `docs/m4_damip_module.md`；每模式支持矩阵与已知问题库见
 `docs/m5_multimodel_userguide.md`。
 
-### 15.2 跨模式异构处理：真实踩坑记录
+### 16.2 跨模式异构处理：真实踩坑记录
 
 13 个候选 hist-aer 模式里只有 3 个发布全部所需变量——**缺云/缺 O₃/缺 rsdt 是主
 路径，不是边缘情况**。以下每一条都是本阶段对真实下载的 ESGF 数据实测踩到的坑，
@@ -872,7 +957,7 @@ case.yaml (source.type: cmip6_damip)
   曾把比湿误当 O3 喂进辐射方案）。`cmip6_damip_source.py` 的 O₃ 分支刻意让这
   类错误难以复现：换算只在一处、读入 mol/mol 字段后立即执行一次。
 
-### 15.3 ESGF 下载客户端（`data/esgf_fetch.py` + `scripts/download_damip.py`）
+### 16.3 ESGF 下载客户端（`data/esgf_fetch.py` + `scripts/download_damip.py`）
 
 纯 stdlib（只用 `urllib`，不依赖 `requests`/`intake-esgf`/`esgpull`），免认证
 下载（DKRZ/CEDA 经典 Solr 搜索 + HTTP Range 请求）。三个真实踩坑：
@@ -901,7 +986,7 @@ case.yaml (source.type: cmip6_damip)
   except 子句（`search_datasets` ×2、`list_files`、`fetch`）现在都同时捕获
   `OSError`（commit `15a2845`）。
 
-### 15.4 如何接入新模式（NorESM2-LM 实测例子）
+### 16.4 如何接入新模式（NorESM2-LM 实测例子）
 
 WP-M5.3 用 NorESM2-LM（不在 M4/M5 八模式清单内）验证了"接入新模式只需
 `configs/damip_models.d/<model>.yaml` + `cases/<case>/case.yaml` 两个 yaml 文件，
@@ -913,7 +998,7 @@ WP-M5.3 用 NorESM2-LM（不在 M4/M5 八模式清单内）验证了"接入新�
 门 `tests/test_damip_userguide_example.py` 说明见
 `docs/m5_multimodel_userguide.md` §"如何接入新模式"一节。
 
-### 15.5 覆盖率与测试
+### 16.5 覆盖率与测试
 
 ```bash
 coverage run -m pytest tests/ -q

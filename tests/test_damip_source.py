@@ -18,6 +18,7 @@ loaders (including the "unknown model/experiment -> warn, don't hard-fail"
 graceful-degradation path from §4.2), and one differing-target-grid case
 that forces the genuine (non-identity) interp_plev_to_target path.
 """
+import glob
 import json
 import os
 import sys
@@ -107,6 +108,94 @@ def test_full_variable_ipsl_all_active_and_no_nan():
     # camt physically bounded
     assert base['camt'].min() >= 0.0 and base['camt'].max() <= 1.0
     assert warm['camt'].min() >= 0.0 and warm['camt'].max() <= 1.0
+
+
+def _copy_fixture(src_dir, dst_dir, flip_lat=False):
+    """Copy a fixture raw_dir, optionally publishing it N->S instead of S->N.
+
+    Also overwrites hfls/hfss with a field whose warm-minus-base difference
+    varies with latitude. The stock fixture's surface fluxes are
+    latitude-uniform, which makes a latitude flip invisible in the derived
+    nonrad forcing -- a test built on them passes whether or not the code
+    under test is correct.
+
+    Fixture time axis is 72 months = 1850-01..1855-12, so
+    ``year = 1850 + t // 12``; the pattern is zero in the base years and
+    lat/lon-dependent in the warm years, giving nonrad = -(warm - base) an
+    unambiguous latitudinal signature.
+    """
+    from netCDF4 import Dataset as _DS
+    os.makedirs(dst_dir, exist_ok=True)
+    for src_path in sorted(glob.glob(os.path.join(src_dir, '*.nc'))):
+        base_name = os.path.basename(src_path)
+        dst_path = os.path.join(dst_dir, base_name)
+        varname = base_name.split('_')[0]
+        with _DS(src_path) as src, _DS(dst_path, 'w', format='NETCDF4') as dst:
+            for dname, dim in src.dimensions.items():
+                dst.createDimension(dname, dim.size)
+            for vname, var in src.variables.items():
+                out = dst.createVariable(vname, var.datatype, var.dimensions)
+                out.setncatts({k: var.getncattr(k) for k in var.ncattrs()
+                               if k != '_FillValue'})
+                data = np.array(var[:])
+                if vname == varname and varname in ('hfls', 'hfss'):
+                    nt, nlat, nlon = data.shape
+                    jj, ii = np.meshgrid(np.arange(nlat), np.arange(nlon), indexing='ij')
+                    pattern = 10.0 * jj + 3.0 * ii
+                    warm = (1850 + np.arange(nt) // 12) >= 1854
+                    data = 100.0 + pattern[None, :, :] * warm[:, None, None]
+                if 'lat' in var.dimensions and flip_lat:
+                    data = np.flip(data, axis=var.dimensions.index('lat'))
+                out[:] = data
+            dst.setncatts({k: src.getncattr(k) for k in src.ncattrs()})
+    return dst_dir
+
+
+def test_nonrad_forcing_is_grid_normalized_like_every_other_field(tmp_path):
+    """Regression test: lhflx/shflx must go through the same normalize_grid
+    permutation as the state fields.
+
+    build_states() normalized every array in base_state/warm_state but left
+    the `nonrad` dict on the raw file ordering. scripts/build_case_input.py's
+    write_nonrad_nc() then writes those arrays against base_state's
+    *normalized* lat/lon axes -- so for a model published N->S the surface
+    latent/sensible heat forcing would land mirrored in latitude relative to
+    every other field, with nothing raising an error.
+
+    All nine models validated in M4/M5 happen to publish lat S->N and lon
+    0-360 ascending (verified against the downloaded ESGF files), which is
+    why no shipped run carries a wrong number -- the defect was latent. This
+    test makes it non-latent by building the same case twice, once from a
+    lat-flipped copy of the fixture.
+    """
+    ref_dir = _copy_fixture(IPSL_RAW_DIR, str(tmp_path / 'ipsl_sn'), flip_lat=False)
+    ref_cfg = _base_cfg(ref_dir, 'IPSL-CM6A-LR', grid_label='gr')
+    ref_base, _ref_warm, ref_nonrad = damip.CMIP6DamipSource(ref_cfg).build_states()
+
+    flipped_dir = _copy_fixture(IPSL_RAW_DIR, str(tmp_path / 'ipsl_ns'), flip_lat=True)
+    flip_cfg = _base_cfg(flipped_dir, 'IPSL-CM6A-LR', grid_label='gr')
+    flip_base, _flip_warm, flip_nonrad = damip.CMIP6DamipSource(flip_cfg).build_states()
+
+    # The forcing must actually vary with latitude, or a flip is invisible
+    # and this test would pass against the buggy code too.
+    assert np.ptp(ref_nonrad['lhflx'], axis=0).max() > 0.0
+
+    # Sanity: the flipped fixture really is a different file ordering that
+    # normalize_grid had to undo (otherwise this test proves nothing).
+    with Dataset(sorted(glob.glob(os.path.join(flipped_dir, 'ta_*.nc')))[0]) as d:
+        raw_lat = np.array(d.variables['lat'][:])
+    assert raw_lat[0] > raw_lat[-1], 'fixture copy should be published N->S'
+
+    # Both builds must land on the same normalized (S->N) latitude axis...
+    np.testing.assert_array_equal(ref_base['lat'], flip_base['lat'])
+    assert np.all(np.diff(flip_base['lat']) > 0)
+
+    # ...and every field, state AND non-radiative forcing, must agree.
+    np.testing.assert_allclose(flip_base['ts'], ref_base['ts'], rtol=0, atol=0)
+    for key in ('lhflx', 'shflx'):
+        np.testing.assert_allclose(
+            flip_nonrad[key], ref_nonrad[key], rtol=0, atol=0,
+            err_msg='nonrad[%r] not normalized with the rest of the state' % key)
 
 
 def test_cloud_degrades_gracefully_on_unsupported_vertical_coordinate(monkeypatch):

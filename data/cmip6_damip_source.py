@@ -705,6 +705,20 @@ class CMIP6DamipSource(DataSource):
                 arr = state[key]
                 if isinstance(arr, np.ndarray) and arr.ndim >= 2:
                     _, _, state[key] = common.normalize_grid(lat, lon, arr)
+        # The non-radiative forcing fields must be reordered by the SAME
+        # permutation. scripts/build_case_input.py's write_nonrad_nc() writes
+        # them against base_state's (normalized) lat/lon axes, so leaving
+        # them on the native ordering silently flips/rolls lhflx & shflx
+        # relative to every other field. All nine models validated in M4/M5
+        # already publish lat S->N and lon 0-360 ascending, which makes
+        # normalize_grid a no-op for them -- so this was latent, not a
+        # wrong number in any shipped run -- but a model that does not
+        # (descending lat, or lon on -180..180) would have produced a
+        # mismatched surface-flux forcing with no error raised.
+        for key in list(nonrad.keys()):
+            arr = nonrad[key]
+            if isinstance(arr, np.ndarray) and arr.ndim >= 2:
+                _, _, nonrad[key] = common.normalize_grid(lat, lon, arr)
         lat_n, lon_n = common.normalize_grid(lat, lon)
         base_state['lat'] = lat_n
         base_state['lon'] = lon_n

@@ -28,7 +28,34 @@ DAMIP（Detection & Attribution MIP）hist-aer 实验：CO2/O3/太阳辐射冻�
 
 ## 四、状态
 
-- 测试：181 passed, 1 skipped（跳过项为需真实网络的可选检验）
-- 新增模块行覆盖率：`esgf_fetch.py` 98-99%，`cmip6_common.py` 98%，`cmip6_damip_source.py` 92-93%，均超合同60%门槛
+- 测试：194 passed, 1 skipped（跳过项为需真实网络的可选检验）
+- 新增模块行覆盖率：`esgf_fetch.py` 98%，`cmip6_common.py` 98%，`cmip6_damip_source.py` 93%，`lr_kernel/lr_attribution` 100%，`kernels.py` 94%，均超合同60%门槛
 - 代码、文档、9个 case 已全部提交并推送到 `feat/m4-m5-damip`
 - 本次同步创建 PR，待走 code review 合并流程
+
+## 五、复审与修复轮（2026-07-29）
+
+对 Phase 2/3 全部产出做了一轮独立复审——不复用开发期结论，直接从 `cfram_result.nc`
+重算验收指标、对活的 ESGF 端点验证下载逻辑、逐模块读代码。结论：**主结论全部成立**
+（8/8 模式跑通、物理检验与恒等式检验确实通过、覆盖率数字属实、9 个输出 md5 互不相同），
+另发现并修复 3 个真实缺陷 + 2 处交付缺口：
+
+| # | 问题 | 性质 | 处理 |
+|---|---|---|---|
+| 1 | `esgf_fetch.list_files()` 的 HTTPServer 识别对 ESGF 真实格式 `url\|mime\|SERVICE` **永远不匹配**，静默退化为"取第一个 http 开头的串"——当 OPENDAP 排在前面时会取回 `.nc.html` 浏览页当 NetCDF 下载 | 真实 bug（潜伏）；原测试用的是臆造格式，给了假信心 | 重写为按服务令牌匹配 + 排除 OPENDAP 端点；补 4 个用真实 ESGF 报文格式的测试 |
+| 2 | `fetch()` 断点续传：服务器忽略 Range 头返回 200 全量时仍按 `'ab'` 追加 → 生成 (残片+全量) 的损坏文件；有 checksum 时报"莫名不匹配"，无 checksum 时静默损坏 | 真实 bug | 仅在确认 206 Partial Content 时才追加，否则整体覆写；补回归测试 |
+| 3 | `cmip6_damip_source.build_states()` 对 base/warm 每个字段都做了 `normalize_grid`，唯独漏了 `nonrad`（lhflx/shflx）；而 writer 是按**归一化后**的 lat/lon 轴写这两个场的 | 真实 bug（潜伏）——当前 9 个模式原生均为 lat S→N、lon 0-360 升序，故已交付结果无一受影响；换一个 N→S 发布的模式则地表通量强迫会在纬向镜像且不报错 | 补上同一置换；测试用 lat 翻转的 fixture 副本验证（去掉修复即失败） |
+| 4 | M4 验收门（净冷却、NH<SH、`dT_sfcdyn=dT_ocndyn+dT_lhflx+dT_shflx` 残差 <1e-10）只在开发期手工核过一次，**没有落进任何产物**——审阅者无从复核 | 交付缺口 | `write_run_summary.py` 新增 "Acceptance gates" 段，每次 run 从 `cfram_result.nc` 重算；9 个 case 的 summary 已全部重生成，全部 PASS（恒等式残差 3.6e-15 ~ 1.6e-14 K，地表 NaN 占比 0） |
+| 5 | `docs/technical_notes_{en,zh}.md` 有 Phase 3 章节但**完全没有 Phase 2 辐射核模块**（grep `kernel\|lapse` 命中 0），与 M5 交付物 3"文档覆盖 Phase 2 + Phase 3 全部新增功能"不符 | 文档缺口 | 两个语种各补一章（算法要点、免 xesmf 决策、与 ClimKern 的 0.9997/0.9999 一致性、M3 归因、masked-array 陷阱、入口脚本表） |
+
+复审中特别核查、确认**不是** bug 的两点，记录以免后人重复怀疑：
+
+- `_climo_pair_for_variable()` 里的 `np.asarray(nc.variables[...][...])` 确实会把
+  masked 元素还原成原始 fill value（~1e20）而非 NaN（已在真实 CMIP6 文件上实测确认），
+  但 `annual_climo_from_monthly()` 在入口用 `|value| > 1e15 → NaN` 拦截了，
+  `fill_subsurface()` 也有同样的护栏——是有意设计，不是 Phase 2 那个 masked-array 事故的重演。
+- 输出 NC 里各 `dT_` 场在 1000/925/850 hPa 有 3.6–3.9% 的 NaN，与 Phase 2 基线
+  `cesm2_4xco2_official` 的分布逐层一致（43.4%/15.5%/10.4%…），是地形以下层的正常掩膜，
+  不是泄漏；`dT_observed` 地表行 NaN 为 0。
+
+修复后：194 passed / 1 skipped，覆盖率无回退，9 个 case 的 summary 已在 hqlx210 重生成并全部通过验收门。

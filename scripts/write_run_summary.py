@@ -234,6 +234,118 @@ def compute_additivity(nc_path):
         }
 
 
+def compute_acceptance_gates(nc_path):
+    """Re-check the M4 end-to-end acceptance gates (docs/plan_ph3.md §8,
+    "Done(=M4 端到端门)") directly from cfram_result.nc, so every run leaves
+    an auditable record of them instead of relying on an ad-hoc check that
+    was run once by hand and never persisted.
+
+    Gates
+    -----
+    identity   ``dT_sfcdyn == dT_ocndyn + dT_lhflx + dT_shflx`` to < 1e-10 K,
+               checked over ALL levels (not just the surface row). This is a
+               construction identity of scripts/run_parallel_python.py, so a
+               non-trivial residual means the decomposition wiring broke --
+               it is the single cheapest tripwire in the whole pipeline
+               (see session_log.md 2026-06-01, where a real double-counting
+               bug showed up here first).
+    surface    no NaN in ``dT_observed`` at the surface row. Below-ground
+               *atmospheric* levels are legitimately NaN (plev > local ps
+               over terrain, ~40% of cells at 1000 hPa) so a whole-array NaN
+               count is not a defect signal; the surface row is.
+    cooling    area-weighted global mean ``dT_observed[sfc]`` in (-3, 0) K
+               and NH mean < SH mean. Direction-only, per the plan: hist-aer
+               is a net-cooling single forcing whose anthropogenic aerosol
+               load is concentrated in the Northern Hemisphere. Reported for
+               every case but only *judged* for experiments flagged
+               net-cooling in configs/damip_experiments.yaml.
+    """
+    out = {'ok': False}
+    with Dataset(nc_path) as d:
+        V = d.variables
+        if 'dT_observed' not in V or 'lat' not in V:
+            out['reason'] = 'dT_observed/lat not present in %s' % nc_path
+            return out
+
+        lat = _mask_fill(V['lat'][:])
+        obs_sfc = _mask_fill(V['dT_observed'][-1, :, :])
+
+        w = np.cos(np.deg2rad(lat))[:, None]
+
+        def _wmean(field):
+            valid = np.isfinite(field)
+            wb = np.broadcast_to(w, field.shape)
+            den = np.sum(np.where(valid, wb, 0.0))
+            if den <= 0:
+                return float('nan')
+            return float(np.sum(np.where(valid, field * wb, 0.0)) / den)
+
+        lat2d = np.broadcast_to(lat[:, None], obs_sfc.shape)
+        out['obs_sfc_gmean'] = _wmean(obs_sfc)
+        out['obs_sfc_nh'] = _wmean(np.where(lat2d > 0, obs_sfc, np.nan))
+        out['obs_sfc_sh'] = _wmean(np.where(lat2d < 0, obs_sfc, np.nan))
+        out['obs_sfc_nan_frac'] = float(np.mean(~np.isfinite(obs_sfc)))
+
+        ident_parts = ('dT_sfcdyn', 'dT_ocndyn', 'dT_lhflx', 'dT_shflx')
+        if all(k in V for k in ident_parts):
+            resid = (_mask_fill(V['dT_ocndyn'][:])
+                     + _mask_fill(V['dT_lhflx'][:])
+                     + _mask_fill(V['dT_shflx'][:])
+                     - _mask_fill(V['dT_sfcdyn'][:]))
+            with np.errstate(invalid='ignore'):
+                out['sfcdyn_identity_max_abs'] = float(np.nanmax(np.abs(resid)))
+        else:
+            out['sfcdyn_identity_max_abs'] = None
+
+        out['ok'] = True
+    return out
+
+
+def judge_acceptance_gates(gates, experiment, damip_experiments_cfg):
+    """Render compute_acceptance_gates() output as PASS/WARNING/INFO rows."""
+    if not gates.get('ok'):
+        return []
+
+    exp_cfg = (damip_experiments_cfg or {}).get(experiment) if experiment else None
+    # Only single-forcing experiments whose forcing is a net cooling agent
+    # get the sign gates judged; hist-GHG (warming) or an unknown/absent
+    # experiment is reported as INFO instead of failed against the wrong
+    # expectation.
+    net_cooling = bool(exp_cfg.get('net_cooling')) if exp_cfg else False
+
+    rows = []
+
+    ident = gates.get('sfcdyn_identity_max_abs')
+    if ident is None:
+        rows.append(('sfcdyn_identity_max_abs', 'n/a',
+                     'INFO (dT_sfcdyn/ocndyn/lhflx/shflx not all present)'))
+    else:
+        rows.append(('sfcdyn_identity_max_abs', '%.3e K' % ident,
+                     'PASS (< 1e-10 K)' if ident < 1e-10
+                     else 'WARNING (>= 1e-10 K -- decomposition identity broken)'))
+
+    nan_frac = gates['obs_sfc_nan_frac']
+    rows.append(('dT_observed[sfc] NaN frac', '%.4f' % nan_frac,
+                 'PASS (no NaN at surface row)' if nan_frac == 0.0
+                 else 'WARNING (NaN leaked into the surface row)'))
+
+    gm = gates['obs_sfc_gmean']
+    nh, sh = gates['obs_sfc_nh'], gates['obs_sfc_sh']
+    if net_cooling:
+        rows.append(('dT_observed[sfc] gmean', '%+.4f K' % gm,
+                     'PASS (net cooling, in (-3, 0) K)' if -3.0 < gm < 0.0
+                     else 'WARNING (outside the (-3, 0) K net-cooling band)'))
+        rows.append(('NH vs SH mean', '%+.4f / %+.4f K' % (nh, sh),
+                     'PASS (NH cooler than SH)' if nh < sh
+                     else 'WARNING (NH not cooler -- aerosol load is NH-weighted)'))
+    else:
+        rows.append(('dT_observed[sfc] gmean', '%+.4f K' % gm,
+                     'INFO (no net_cooling expectation for experiment=%s)' % experiment))
+        rows.append(('NH vs SH mean', '%+.4f / %+.4f K' % (nh, sh), 'INFO'))
+
+    return rows
+
+
 def md5_of_file(path, chunk_size=1 << 20):
     h = hashlib.md5()
     with open(path, 'rb') as f:
@@ -321,7 +433,8 @@ def judge_sanity_checks(sanity_checks, experiment, damip_experiments_cfg):
     return rows
 
 
-def build_summary_text(case, cfg, provenance, additivity, sanity_rows, checksums):
+def build_summary_text(case, cfg, provenance, additivity, sanity_rows, checksums,
+                        gate_rows=None):
     lines = []
     W = 78
     lines.append("=" * W)
@@ -412,6 +525,24 @@ def build_summary_text(case, cfg, provenance, additivity, sanity_rows, checksums
     else:
         lines.append("N/A: %s" % additivity.get('reason'))
 
+    # ---- M4 acceptance gates ---------------------------------------------
+    lines.append("")
+    lines.append("-" * W)
+    lines.append("Acceptance gates (docs/plan_ph3.md §8 M4 end-to-end gate)")
+    lines.append("-" * W)
+    if gate_rows:
+        for key, value, judgment in gate_rows:
+            lines.append("  %-26s = %-22s %s" % (key, value, judgment))
+        lines.append("")
+        lines.append("Recomputed from cfram_result.nc on every run. The sfcdyn identity is "
+                     "exact by construction (scripts/run_parallel_python.py derives sfcdyn "
+                     "from ocndyn+lhflx+shflx), so anything above ~1e-10 K means the "
+                     "decomposition wiring regressed. NaN at below-ground *atmospheric* "
+                     "levels is expected (plev > local ps over terrain) and is not counted "
+                     "here; only the surface row is gated.")
+    else:
+        lines.append("  (not available -- cfram_result.nc missing dT_observed/lat)")
+
     # ---- Single-forcing consistency -------------------------------------
     lines.append("")
     lines.append("-" * W)
@@ -464,17 +595,23 @@ def main():
     additivity = compute_additivity(result_nc)
 
     experiment = (provenance or {}).get('experiment')
+    if experiment is None:
+        experiment = (cfg.get('source', {}) or {}).get('experiment')
     damip_experiments_cfg = load_damip_experiments_cfg()
     sanity_rows = []
     if provenance is not None and 'sanity_checks' in provenance:
         sanity_rows = judge_sanity_checks(
             provenance['sanity_checks'], experiment, damip_experiments_cfg)
 
+    gate_rows = judge_acceptance_gates(
+        compute_acceptance_gates(result_nc), experiment, damip_experiments_cfg)
+
     checksums = []
     for nc_path in sorted(glob.glob(os.path.join(input_dir, '*.nc'))):
         checksums.append((os.path.basename(nc_path), md5_of_file(nc_path)))
 
-    text = build_summary_text(args.case, cfg, provenance, additivity, sanity_rows, checksums)
+    text = build_summary_text(args.case, cfg, provenance, additivity, sanity_rows,
+                              checksums, gate_rows)
 
     out_path = os.path.join(output_dir, '%s.summary.txt' % args.case)
     os.makedirs(output_dir, exist_ok=True)

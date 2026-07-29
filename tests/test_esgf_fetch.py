@@ -60,11 +60,18 @@ from data import esgf_fetch as esgf
 # ---------------------------------------------------------------------------
 
 class _FakeHTTPResponse:
-    """Minimal stand-in for the context-manager object urlopen() returns."""
+    """Minimal stand-in for the context-manager object urlopen() returns.
 
-    def __init__(self, payload: bytes):
+    `status` mirrors http.client.HTTPResponse.status. It matters for the
+    resume path: fetch() may only append to a partial file when the server
+    actually answered 206 Partial Content. Default 200 (a full body), which
+    is what a server that ignored the Range header returns.
+    """
+
+    def __init__(self, payload: bytes, status: int = 200):
         self._payload = payload
         self._pos = 0
+        self.status = status
 
     def read(self, size=-1):
         # Must behave like a real chunked-read stream (fetch()'s download
@@ -361,6 +368,78 @@ def test_list_files_url_as_list_scans_all_entries_for_httpserver(monkeypatch):
     files = esgf.list_files('ds1')
     assert len(files) == 1
     assert files[0]['url'] == 'http://real.example/found.nc'
+
+
+# --- real ESGF wire format: "<url>|<mime_type>|<service_name>" --------------
+#
+# The synthetic formats used by the tests above ('...|HTTPServer|download',
+# 'esgf.example|HTTPServer|http://...') are NOT what ESGF actually returns.
+# Verified against live DKRZ and CEDA Solr responses, the service name is the
+# LAST token and the URL the first:
+#
+#   https://esgf.ceda.ac.uk/thredds/fileServer/.../ta_....nc|application/netcdf|HTTPServer
+#   https://esgf.ceda.ac.uk/thredds/dodsC/.../ta_....nc.html|application/opendap-html|OPENDAP
+#
+# The original token-adjacency logic matched neither ordering for that shape
+# and silently fell through to "first token starting with http", which
+# returns the OPENDAP *browse page* whenever OPENDAP is listed first.
+
+_REAL_HTTPSERVER = ('https://esgf.ceda.ac.uk/thredds/fileServer/esg_cmip6/CMIP6/DAMIP/'
+                    'IPSL/IPSL-CM6A-LR/hist-aer/r1i1p1f1/Amon/ta/gr/v20180914/ta.nc'
+                    '|application/netcdf|HTTPServer')
+_REAL_OPENDAP = ('https://esgf.ceda.ac.uk/thredds/dodsC/esg_cmip6/CMIP6/DAMIP/'
+                 'IPSL/IPSL-CM6A-LR/hist-aer/r1i1p1f1/Amon/ta/gr/v20180914/ta.nc.html'
+                 '|application/opendap-html|OPENDAP')
+_REAL_GRIDFTP = ('gsiftp://esgf3.dkrz.de:2811//cmip6/DAMIP/IPSL/IPSL-CM6A-LR/'
+                 'hist-aer/r1i1p1f1/Amon/ta/gr/v20180914/ta.nc'
+                 '|application/gridftp|GridFTP')
+
+
+def _list_files_with(docs, monkeypatch):
+    def fake_urlopen(url, timeout=30):
+        return _FakeHTTPResponse(_solr_payload(docs))
+    monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
+    return esgf.list_files('ds1')
+
+
+def test_list_files_real_esgf_format_picks_httpserver_not_opendap(monkeypatch):
+    """OPENDAP listed FIRST must not win: order is not guaranteed by ESGF."""
+    docs = [{'title': 'ta.nc', 'size': 1,
+             'url': [_REAL_OPENDAP, _REAL_GRIDFTP, _REAL_HTTPSERVER]}]
+    files = _list_files_with(docs, monkeypatch)
+    assert len(files) == 1
+    url = files[0]['url']
+    assert '/thredds/fileServer/' in url
+    assert not url.endswith('.html')
+
+
+def test_list_files_real_esgf_format_httpserver_first_still_works(monkeypatch):
+    """The ordering seen in live responses today -- must keep working."""
+    docs = [{'title': 'ta.nc', 'size': 1,
+             'url': [_REAL_HTTPSERVER, _REAL_OPENDAP]}]
+    files = _list_files_with(docs, monkeypatch)
+    assert '/thredds/fileServer/' in files[0]['url']
+
+
+def test_list_files_opendap_only_is_not_preferred_over_nothing(monkeypatch):
+    """With no HTTPServer entry at all, an OPENDAP browse URL is the only
+    http candidate left. It is still returned (pass 3, last resort) rather
+    than dropping the file, but only after the non-OPENDAP passes fail --
+    the caller's checksum check is what ultimately rejects an HTML body."""
+    docs = [{'title': 'ta.nc', 'size': 1, 'url': [_REAL_OPENDAP]}]
+    files = _list_files_with(docs, monkeypatch)
+    assert len(files) == 1
+    assert files[0]['url'].endswith('.nc.html')
+
+
+def test_list_files_prefers_plain_http_over_opendap_when_no_service_labels(monkeypatch):
+    """No recognizable service token anywhere: pass 2 must still skip the
+    OPENDAP-shaped URL in favour of the plain file URL."""
+    docs = [{'title': 'ta.nc', 'size': 1,
+             'url': ['http://x.example/thredds/dodsC/ta.nc.html|application/opendap-html|WAT',
+                     'http://x.example/files/ta.nc|application/netcdf|WAT']}]
+    files = _list_files_with(docs, monkeypatch)
+    assert files[0]['url'] == 'http://x.example/files/ta.nc'
 
 
 # ---------------------------------------------------------------------------
@@ -694,7 +773,9 @@ def test_fetch_resumes_partial_download_when_expected_size_known(tmp_path, monke
 
     def fake_urlopen(req, timeout=60):
         captured_range['Range'] = req.get_header('Range')
-        return _FakeHTTPResponse(remaining)
+        # A server that honours the Range header replies 206 with ONLY the
+        # requested tail -- that is the case where appending is correct.
+        return _FakeHTTPResponse(remaining, status=206)
 
     monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
     ok = esgf.fetch('http://x/file.nc', str(dest), expected_size=len(full_content))
@@ -702,6 +783,32 @@ def test_fetch_resumes_partial_download_when_expected_size_known(tmp_path, monke
     assert ok is True
     assert captured_range['Range'] == 'bytes=6-'
     assert dest.read_bytes() == full_content  # appended, not overwritten
+
+
+def test_fetch_server_ignores_range_and_returns_200_overwrites_not_appends(
+        tmp_path, monkeypatch):
+    """Regression test: sending a Range header does not guarantee a 206.
+
+    A server (or intercepting proxy/mirror) may ignore Range and answer 200
+    with the FULL body. Appending that to the partial file used to produce a
+    (partial + full) frankenfile -- 22 bytes here instead of 16 -- which a
+    checksum would reject as a mysterious "mismatch" and which, with no
+    checksum supplied, was silently written to disk as a corrupt NetCDF.
+    """
+    full_content = b'0123456789ABCDEF'  # 16 bytes
+    dest = tmp_path / 'file.nc'
+    dest.write_bytes(full_content[:6])  # partial download on disk
+
+    def fake_urlopen(req, timeout=60):
+        assert req.get_header('Range') == 'bytes=6-'   # we did ask
+        return _FakeHTTPResponse(full_content, status=200)  # ...and were ignored
+
+    monkeypatch.setattr(urllib.request, 'urlopen', fake_urlopen)
+    ok = esgf.fetch('http://x/file.nc', str(dest), expected_size=len(full_content))
+
+    assert ok is True
+    assert dest.read_bytes() == full_content
+    assert dest.stat().st_size == len(full_content)
 
 
 def test_fetch_does_not_resume_when_existing_file_already_matches_expected_size(
